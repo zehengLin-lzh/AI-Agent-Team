@@ -150,6 +150,7 @@ Starts:
 | Command | Description |
 |---|---|
 | `/help` | Show all commands |
+| `/llm [provider]` | Switch LLM provider (ollama / huggingface) or list providers |
 | `/model [name]` | Switch model or list available models |
 | `/mode <mode>` | Switch mode (thinking/coding/brainstorming/architecture/execution) |
 | `/status` | Connection and model info |
@@ -185,7 +186,58 @@ Starts:
 
 ---
 
+## LLM Providers
+
+The system supports multiple LLM backends, switchable at runtime:
+
+### Ollama (default — local, offline)
+
+```bash
+ollama pull qwen2.5-coder:7b
+mat-agent-cli
+# In CLI:
+/llm ollama
+/model qwen2.5-coder:14b
+```
+
+### HuggingFace (cloud API or local TGI)
+
+```bash
+# Set your HuggingFace token
+export HF_TOKEN="hf_..."
+
+# Start the backend, then in CLI:
+/llm huggingface
+/model Qwen/Qwen2.5-Coder-7B-Instruct
+```
+
+**Local TGI server** (for fully offline HF models):
+```bash
+# Run a TGI server (Docker)
+docker run --gpus all -p 8080:80 \
+  ghcr.io/huggingface/text-generation-inference:latest \
+  --model-id Qwen/Qwen2.5-Coder-7B-Instruct
+
+# Point Agent Team at it
+export HF_API_URL="http://localhost:8080"
+```
+
+**Environment variables:**
+| Variable | Description |
+|---|---|
+| `HF_TOKEN` | HuggingFace API token (required for cloud API) |
+| `HF_API_URL` | Custom endpoint (default: HF Inference API) |
+| `HF_MODEL` | Default HF model |
+
+---
+
 ## Customization
+
+**Switch provider at runtime:**
+```
+/llm huggingface
+/llm ollama
+```
 
 **Switch model at runtime:**
 ```
@@ -206,15 +258,25 @@ export AGENT_TEAM_PLAN_DIR="~/Documents/agent-plans"
 
 ## Recommended Models
 
+### Ollama (local)
+
 | Model | VRAM | Code Quality | Reasoning |
 |---|---|---|---|
 | `qwen2.5-coder:32b` | 20 GB | ★★★★★ | ★★★★ |
 | `qwen2.5-coder:14b` | 10 GB | ★★★★ | ★★★ |
 | `deepseek-r1:14b` | 10 GB | ★★★ | ★★★★★ |
 | `qwen2.5-coder:7b` | 5 GB | ★★★ | ★★★ |
-| `llama3.1:8b` | 5 GB | ★★ | ★★★ |
 
-Default: **`qwen2.5-coder:7b`** (works on most machines). Recommended: **`14b`** if you have the VRAM.
+### HuggingFace
+
+| Model | Type | Notes |
+|---|---|---|
+| `Qwen/Qwen2.5-Coder-7B-Instruct` | Code | Strong coding, good reasoning |
+| `mistralai/Mistral-7B-Instruct-v0.3` | General | Balanced, fast |
+| `meta-llama/Meta-Llama-3.1-8B-Instruct` | General | Strong reasoning |
+| `microsoft/Phi-3.5-mini-instruct` | Compact | Small but capable |
+| `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | Code | Coding specialist |
+| `bigcode/starcoder2-15b` | Code | Large code model |
 
 ---
 

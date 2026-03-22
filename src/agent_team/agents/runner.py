@@ -10,7 +10,7 @@ from agent_team.agents.definitions import (
     get_agent_prompt, CONTEXT_AGENTS,
 )
 from agent_team.agents.context import build_context_for_agent
-from agent_team.ollama.client import stream_ollama, SessionTokenTracker, get_active_model
+from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model
 from agent_team.files.writer import extract_and_write_files, extract_run_commands, _resolve_base_dir
 from agent_team.files.scaffolder import scaffold_plan_paths
 from agent_team.plans.storage import save_plan_markdown
@@ -46,7 +46,7 @@ class AgentTeam:
             "role": "user",
             "content": f"Please proceed as {agent_name}.",
         })
-        output = await stream_ollama(
+        output = await stream_llm(
             system_prompt=system_prompt,
             messages=messages,
             ws=self.ws,

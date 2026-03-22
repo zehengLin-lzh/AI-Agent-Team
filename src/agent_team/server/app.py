@@ -9,9 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from agent_team.config import MODEL, OLLAMA_BASE_URL, REPO_ROOT
+from agent_team.config import REPO_ROOT
 from agent_team.agents.runner import AgentTeam
-from agent_team.ollama.client import get_active_model, set_active_model
+from agent_team.llm import get_active_model, set_active_model
+from agent_team.llm.registry import (
+    get_provider, set_provider, get_active_provider_name, list_providers,
+)
 from agent_team.agents.http_runner import (
     AskMode, AskRequest, AskResponse, run_team_http,
 )
@@ -92,32 +95,21 @@ async def ask(request: AskRequest):
 
 @app.get("/health")
 async def health():
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            models = [m["name"] for m in r.json().get("models", [])]
-            has_model = any(MODEL.split(":")[0] in m for m in models)
-            return {
-                "status": "ok",
-                "ollama": "connected",
-                "model": MODEL,
-                "model_available": has_model,
-                "available_models": models,
-            }
-    except Exception as e:
-        return {"status": "error", "ollama": f"not reachable: {e}"}
+    provider = get_provider()
+    result = await provider.health_check()
+    result["active_provider"] = get_active_provider_name()
+    return result
 
 
 @app.get("/models")
 async def list_models():
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            data = r.json()
-            data["active_model"] = get_active_model()
-            return data
-    except Exception as e:
-        return {"error": str(e)}
+    provider = get_provider()
+    models = await provider.list_models()
+    return {
+        "provider": get_active_provider_name(),
+        "active_model": get_active_model(),
+        "models": [{"name": m} for m in models],
+    }
 
 
 @app.post("/models/switch")
@@ -125,17 +117,49 @@ async def switch_model(body: dict):
     model_name = body.get("model", "").strip()
     if not model_name:
         return {"error": "model name required"}
-    # Verify model exists in Ollama
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            available = [m["name"] for m in r.json().get("models", [])]
-            if not any(model_name in m for m in available):
-                return {"error": f"Model '{model_name}' not found", "available": available}
-    except Exception as e:
-        return {"error": f"Cannot reach Ollama: {e}"}
+    provider = get_provider()
+    available = await provider.list_models()
+    if available and not any(model_name in m for m in available):
+        return {"error": f"Model '{model_name}' not found", "available": available}
     set_active_model(model_name)
-    return {"status": "ok", "active_model": model_name}
+    return {
+        "status": "ok",
+        "provider": get_active_provider_name(),
+        "active_model": model_name,
+    }
+
+
+@app.get("/providers")
+async def get_providers():
+    """List available LLM providers and their status."""
+    results = []
+    for name in list_providers():
+        p = get_provider(name)
+        health = await p.health_check()
+        results.append({
+            "name": name,
+            "active": name == get_active_provider_name(),
+            "model": p.get_active_model(),
+            "status": health.get("status", "unknown"),
+        })
+    return {"providers": results, "active": get_active_provider_name()}
+
+
+@app.post("/providers/switch")
+async def switch_provider(body: dict):
+    """Switch the active LLM provider."""
+    provider_name = body.get("provider", "").strip()
+    if not provider_name:
+        return {"error": "provider name required"}
+    try:
+        set_provider(provider_name)
+        return {
+            "status": "ok",
+            "provider": provider_name,
+            "model": get_active_model(),
+        }
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 # Serve frontend static files

@@ -3,7 +3,7 @@ from agent_team.memory.database import MemoryDB
 from agent_team.memory.embeddings import get_embedding
 from agent_team.memory.indexer import index_session
 from agent_team.memory.types import LearnedPattern
-from agent_team.ollama.client import call_ollama
+from agent_team.llm import call_llm
 import uuid
 
 
@@ -94,7 +94,7 @@ async def extract_session_knowledge(
     quality = 0.5
 
     try:
-        extraction = await call_ollama(
+        extraction = await call_llm(
             system_prompt=SUMMARY_PROMPT,
             messages=[{"role": "user", "content": transcript[:8000]}],  # Cap input
             temperature=0.2,

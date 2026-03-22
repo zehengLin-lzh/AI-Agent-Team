@@ -1,0 +1,86 @@
+"""LLM provider registry — switch between Ollama, HuggingFace, etc."""
+from fastapi import WebSocket
+
+from agent_team.llm.base import LLMProvider, SessionTokenTracker
+
+# Lazy-initialized providers
+_providers: dict[str, LLMProvider] = {}
+_active_provider: str = "ollama"
+
+
+def _ensure_providers():
+    """Initialize providers on first access."""
+    if _providers:
+        return
+    from agent_team.llm.ollama_provider import OllamaProvider
+    from agent_team.llm.huggingface_provider import HuggingFaceProvider
+    _providers["ollama"] = OllamaProvider()
+    _providers["huggingface"] = HuggingFaceProvider()
+
+
+def get_provider(name: str | None = None) -> LLMProvider:
+    """Get a provider by name, or the active provider."""
+    _ensure_providers()
+    return _providers[name or _active_provider]
+
+
+def set_provider(name: str) -> None:
+    """Switch the active provider."""
+    global _active_provider
+    _ensure_providers()
+    if name not in _providers:
+        raise ValueError(f"Unknown provider '{name}'. Available: {list(_providers.keys())}")
+    _active_provider = name
+
+
+def get_active_provider_name() -> str:
+    return _active_provider
+
+
+def list_providers() -> list[str]:
+    _ensure_providers()
+    return list(_providers.keys())
+
+
+# ── Convenience functions (match the old API) ────────────────────────────────
+
+def get_active_model() -> str:
+    return get_provider().get_active_model()
+
+
+def set_active_model(model: str) -> None:
+    get_provider().set_active_model(model)
+
+
+async def stream_llm(
+    system_prompt: str,
+    messages: list[dict],
+    ws: WebSocket,
+    agent_name: str,
+    agent_color: str = "#ffffff",
+    temperature: float = 0.3,
+    token_tracker: SessionTokenTracker | None = None,
+) -> str:
+    """Stream via the active provider."""
+    return await get_provider().stream(
+        system_prompt=system_prompt,
+        messages=messages,
+        ws=ws,
+        agent_name=agent_name,
+        agent_color=agent_color,
+        temperature=temperature,
+        token_tracker=token_tracker,
+    )
+
+
+async def call_llm(
+    system_prompt: str,
+    messages: list[dict],
+    temperature: float = 0.3,
+) -> str:
+    """Non-streaming call via the active provider."""
+    return await get_provider().call(
+        system_prompt=system_prompt,
+        messages=messages,
+        temperature=temperature,
+    )

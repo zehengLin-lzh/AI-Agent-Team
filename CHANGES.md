@@ -2,6 +2,67 @@
 
 ---
 
+## v2.3.0 — HuggingFace LLM Provider Support (2026-03-22)
+
+### Summary
+
+Added a pluggable LLM provider architecture. The system now supports both **Ollama** (local) and **HuggingFace** (Inference API or local TGI server) as LLM backends, switchable at runtime via CLI (`/llm`) or API.
+
+### New Files
+
+| File | Description |
+|---|---|
+| `src/agent_team/llm/__init__.py` | LLM package exports |
+| `src/agent_team/llm/base.py` | Abstract `LLMProvider` interface + `TokenStats`/`SessionTokenTracker` |
+| `src/agent_team/llm/ollama_provider.py` | Ollama provider (refactored from `ollama/client.py`) |
+| `src/agent_team/llm/huggingface_provider.py` | HuggingFace provider (Inference API + local TGI) |
+| `src/agent_team/llm/registry.py` | Provider registry — switching, convenience functions |
+
+### Modified Files
+
+| File | What changed |
+|---|---|
+| `src/agent_team/agents/runner.py` | `stream_ollama` → `stream_llm` (provider-agnostic) |
+| `src/agent_team/agents/http_runner.py` | `call_ollama` → `call_llm` |
+| `src/agent_team/learning/extractor.py` | `call_ollama` → `call_llm` |
+| `src/agent_team/server/app.py` | New endpoints: `GET /providers`, `POST /providers/switch`. Health/models endpoints now provider-aware |
+| `src/agent_team/cli/interactive.py` | Added `/llm` slash command for provider switching, version bump to 2.3.0 |
+
+### HuggingFace Setup
+
+```bash
+# Set your HF token
+export HF_TOKEN="hf_..."
+
+# Optional: use a local TGI server instead of HF API
+export HF_API_URL="http://localhost:8080"
+
+# Optional: set default HF model
+export HF_MODEL="Qwen/Qwen2.5-Coder-7B-Instruct"
+```
+
+### Supported HF Models
+
+- `mistralai/Mistral-7B-Instruct-v0.3` (default)
+- `meta-llama/Meta-Llama-3.1-8B-Instruct`
+- `Qwen/Qwen2.5-Coder-7B-Instruct`
+- `microsoft/Phi-3.5-mini-instruct`
+- `google/gemma-2-9b-it`
+- `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`
+- `bigcode/starcoder2-15b`
+- `codellama/CodeLlama-13b-Instruct-hf`
+
+### CLI Usage
+
+```
+/llm                    # List providers and their status
+/llm huggingface        # Switch to HuggingFace
+/llm ollama             # Switch back to Ollama
+/model <model_name>     # Switch model within active provider
+```
+
+---
+
 ## v2.2.0 — Distribution Ready (2026-03-22)
 
 ### Summary

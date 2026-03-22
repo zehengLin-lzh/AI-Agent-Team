@@ -8,7 +8,7 @@ from agent_team.agents.definitions import (
     get_agent_prompt, CONTEXT_AGENTS,
 )
 from agent_team.agents.context import build_context_for_agent
-from agent_team.ollama.client import call_ollama
+from agent_team.llm import call_llm
 from agent_team.files.writer import extract_and_write_files
 from agent_team.files.scaffolder import scaffold_plan_paths
 
@@ -50,7 +50,7 @@ async def _run_agent_http(
         "role": "user",
         "content": f"Please proceed as {agent_name}.",
     })
-    content = await call_ollama(
+    content = await call_llm(
         system_prompt=system_prompt,
         messages=messages,
         temperature=temperature,

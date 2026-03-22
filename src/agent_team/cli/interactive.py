@@ -40,7 +40,7 @@ from websockets.exceptions import ConnectionClosedError
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Agent Team"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.3.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -95,6 +95,7 @@ pt_style = PTStyle.from_dict({
 @dataclass
 class CLIState:
     llm_provider: str = "ollama"
+    available_providers: list[str] = field(default_factory=lambda: ["ollama", "huggingface"])
     model: str = "qwen2.5-coder:7b"
     mode: str = "coding"
     available_models: list[str] = field(default_factory=list)
@@ -120,6 +121,7 @@ async def check_backend() -> bool:
             data = r.json()
             state.backend_connected = data.get("status") == "ok"
             if state.backend_connected:
+                state.llm_provider = data.get("active_provider", state.llm_provider)
                 state.model = data.get("model", state.model)
                 # Fetch available models
                 r2 = await client.get(f"{BACKEND_URL}/models")
@@ -130,10 +132,24 @@ async def check_backend() -> bool:
                 active = models_data.get("active_model")
                 if active:
                     state.model = active
+                state.llm_provider = models_data.get("provider", state.llm_provider)
+                # Fetch providers
+                r3 = await client.get(f"{BACKEND_URL}/providers")
+                prov_data = r3.json()
+                state.available_providers = [
+                    p["name"] for p in prov_data.get("providers", [])
+                ]
             return state.backend_connected
     except Exception:
         state.backend_connected = False
         return False
+
+
+async def switch_provider_remote(provider_name: str) -> dict:
+    """Switch LLM provider on the backend."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        r = await client.post(f"{BACKEND_URL}/providers/switch", json={"provider": provider_name})
+        return r.json()
 
 
 async def switch_model_remote(model_name: str) -> dict:
@@ -203,15 +219,16 @@ def render_help():
 
     commands = [
         ("/help", "Show this help menu"),
-        ("/model", "Switch the active model (e.g., /model llama3.2)"),
+        ("/llm [provider]", "Switch LLM provider (e.g., /llm huggingface) or list providers"),
+        ("/model [name]", "Switch the active model (e.g., /model llama3.2)"),
         ("/model list", "List all available models"),
         ("/mode <mode>", "Switch mode: thinking, coding, brainstorming, architecture, execution"),
         ("/status", "Show current connection status and model info"),
         ("/tokens", "Show token usage for the current session"),
         ("/clear", "Clear the screen"),
         ("/history", "Show conversation history summary"),
-        ("/plan", "Submit a task in plan-only mode (no execution)"),
-        ("/exec", "Submit a task with execution enabled"),
+        ("/plan <task>", "Submit a task in plan-only mode (no execution)"),
+        ("/exec <task>", "Submit a task with execution enabled"),
         ("/exit, /quit", "Exit the CLI"),
     ]
     for cmd, desc in commands:
@@ -425,6 +442,55 @@ async def stream_conversation(
 
 
 # ── Slash Command Handlers ───────────────────────────────────────────────────
+
+async def handle_llm_command(args: str):
+    """Handle /llm commands — list or switch LLM providers."""
+    args = args.strip().lower()
+
+    if not args:
+        # List providers
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{BACKEND_URL}/providers")
+                data = r.json()
+                providers = data.get("providers", [])
+        except Exception:
+            providers = [
+                {"name": "ollama", "active": state.llm_provider == "ollama", "model": "—", "status": "unknown"},
+                {"name": "huggingface", "active": state.llm_provider == "huggingface", "model": "—", "status": "unknown"},
+            ]
+
+        table = Table(title="LLM Providers", border_style="cyan", header_style="bold cyan")
+        table.add_column("Provider", style="bold")
+        table.add_column("Model", style="white")
+        table.add_column("Status", justify="center")
+        table.add_column("Active", justify="center")
+
+        for p in providers:
+            status_icon = "[green]\u2714[/]" if p.get("status") == "ok" else "[red]\u2716[/]"
+            active_icon = "[green]\u25cf[/]" if p.get("active") else ""
+            table.add_row(p["name"], p.get("model", "—"), status_icon, active_icon)
+
+        console.print()
+        console.print(table)
+        console.print()
+        console.print("[dim]Usage: /llm <provider_name> to switch[/]")
+        console.print("[dim]  Providers: ollama (local), huggingface (API or local TGI)[/]")
+        console.print("[dim]  For HuggingFace: export HF_TOKEN='hf_...' before starting backend[/]")
+        return
+
+    # Switch provider
+    result = await switch_provider_remote(args)
+    if result.get("status") == "ok":
+        state.llm_provider = result.get("provider", args)
+        state.model = result.get("model", state.model)
+        console.print(f"[success]\u2714 Switched to: [bold]{state.llm_provider}[/] (model: {state.model})[/]")
+        # Refresh model list for new provider
+        await check_backend()
+    else:
+        error = result.get("error", "Unknown error")
+        console.print(f"[error]\u2716 {error}[/]")
+
 
 async def handle_model_command(args: str):
     """Handle /model commands."""
@@ -651,6 +717,9 @@ async def main():
 
                 elif cmd == "/help":
                     render_help()
+
+                elif cmd == "/llm":
+                    await handle_llm_command(args)
 
                 elif cmd == "/model":
                     await handle_model_command(args)
