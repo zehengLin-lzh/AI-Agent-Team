@@ -62,6 +62,12 @@ AI Agent Team/
 │   │   ├── providers.py              #     8 frontier providers
 │   │   ├── ollama_provider.py        #     Ollama provider
 │   │   └── huggingface_provider.py   #     HuggingFace provider
+│   ├── mcp/                          #   MCP integration
+│   │   ├── config.py                 #     Server config (mcp.json)
+│   │   ├── client.py                 #     Stdio client (JSON-RPC 2.0)
+│   │   ├── registry.py               #     Server & tool registry
+│   │   ├── triggers.py               #     Keyword trigger detection
+│   │   └── tool_executor.py          #     Parse & execute tool calls
 │   ├── ollama/                       #   Legacy Ollama client
 │   │   └── client.py                 #     Direct Ollama streaming
 │   ├── memory/                       #   Memory system
@@ -169,6 +175,11 @@ Starts:
 | `/mode <mode>` | Switch mode (thinking/coding/brainstorming/architecture/execution) |
 | `/status` | Connection and model info |
 | `/tokens` | Token usage for current session |
+| `/mcp` | List MCP servers, status, and tools |
+| `/mcp connect` | Connect to all configured MCP servers |
+| `/mcp add <name>` | Add a new MCP server (interactive) |
+| `/mcp search <query>` | Search for MCP servers by domain |
+| `/skills` | List installed skills |
 | `/plan <task>` | Plan-only mode (no execution) |
 | `/exec <task>` | Plan + execute with directory selection |
 | `/clear` | Clear screen |
@@ -268,6 +279,70 @@ docker run --gpus all -p 8080:80 \
 
 export HF_API_URL="http://localhost:8080"
 ```
+
+---
+
+## MCP Integration (External Tools)
+
+The agent team supports [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) for connecting external tools and services. MCP servers give agents access to databases, file systems, APIs, and more.
+
+### Quick Start
+
+```bash
+# 1. Copy the example config
+cp mcp.json.example mcp.json
+
+# 2. Edit to enable the servers you need
+# 3. In the CLI:
+/mcp connect      # Connect to configured servers
+/mcp tools        # See available tools
+```
+
+### Adding MCP Servers
+
+**Interactive:**
+```
+/mcp add sqlite
+  Type: stdio
+  Command: uvx
+  Arguments: mcp-server-sqlite --db-path data/db.sqlite
+  Description: SQLite database management
+  Triggers: database, sql, query
+```
+
+**Manual** — edit `mcp.json`:
+```json
+{
+  "mcpServers": {
+    "sqlite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "data/db.sqlite"],
+      "triggers": ["database", "sql", "query"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Keyword Triggers
+
+When your request mentions domains like "database", "git", "web", etc., the CLI automatically suggests relevant MCP servers or skills. Search for servers:
+
+```
+/mcp search database
+/mcp search git
+/mcp search web
+```
+
+### Local vs Remote MCP
+
+| MCP Type | Local LLM | Frontier LLM |
+|---|---|---|
+| **stdio** (local subprocess) | Supported | Supported |
+| **SSE** (remote server) | Not supported | Supported |
+
+Local LLMs (Ollama/HuggingFace) can only use local stdio MCP servers. For remote SSE servers, switch to a frontier LLM (`/llm openai`) or download the server source code to run locally.
 
 ---
 

@@ -2,6 +2,88 @@
 
 ---
 
+## v2.5.0 — MCP & Skills Integration (2026-03-22)
+
+### Summary
+
+Added MCP (Model Context Protocol) support for connecting external tools and services. The agent team can now use MCP servers (local stdio) to access databases, file systems, git repos, web services, and more. Skills system enhanced with trigger-based suggestions. Keyword detection automatically suggests relevant tools when the user's request involves domains like database, git, web, etc.
+
+### Architecture
+
+```
+User request → Keyword trigger detection → Suggest MCP servers/skills
+                                         ↓
+Agent pipeline runs with MCP tool descriptions in system prompts
+                                         ↓
+Agent outputs TOOL_CALL blocks → Executor runs tools via MCP → Results injected
+```
+
+**Local LLM restriction:** Remote SSE MCP servers are not supported with local LLMs (Ollama/HuggingFace) because local models cannot reliably decompose requests for remote tool calls. Users are prompted to either switch to a frontier LLM or download the server source code to run locally.
+
+### New Files
+
+| File | Description |
+|---|---|
+| `src/agent_team/mcp/__init__.py` | MCP package exports |
+| `src/agent_team/mcp/config.py` | MCP server config loader (`mcp.json`) |
+| `src/agent_team/mcp/client.py` | MCP stdio client (JSON-RPC 2.0 over stdin/stdout) |
+| `src/agent_team/mcp/registry.py` | MCP server registry (connections, tool discovery, tool execution) |
+| `src/agent_team/mcp/triggers.py` | Keyword-based trigger detection for MCP and skills |
+| `src/agent_team/mcp/tool_executor.py` | Parse TOOL_CALL blocks from LLM output, execute via MCP |
+| `mcp.json.example` | Example MCP server configuration |
+
+### Modified Files
+
+| File | What changed |
+|---|---|
+| `src/agent_team/agents/runner.py` | MCP tool prompts injected into agent system prompts, tool call execution in output |
+| `src/agent_team/server/app.py` | MCP auto-connect on WebSocket sessions, `GET /mcp/status` endpoint |
+| `src/agent_team/cli/interactive.py` | `/mcp` and `/skills` commands, trigger detection before conversations |
+
+### CLI Commands
+
+```
+/mcp                    # List all MCP servers and status
+/mcp connect            # Connect to all enabled servers
+/mcp tools              # List all available MCP tools
+/mcp add <name>         # Add a new MCP server (interactive)
+/mcp remove <name>      # Remove a server
+/mcp toggle <name>      # Enable/disable a server
+/mcp search <query>     # Search for MCP servers by domain
+/skills                 # List installed skills
+/skills reload          # Reload skills from disk
+```
+
+### MCP Configuration (`mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "sqlite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "data/db.sqlite"],
+      "description": "SQLite database management",
+      "triggers": ["database", "sql", "query"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Tool Call Format
+
+Agents can invoke MCP tools by outputting:
+```
+--- TOOL_CALL: read_query ---
+{"query": "SELECT * FROM users LIMIT 5"}
+--- END TOOL_CALL ---
+```
+
+Results are automatically injected as `--- TOOL_RESULT ---` blocks.
+
+---
+
 ## v2.4.0 — Auto Backend + Mat Agent Team Rebrand (2026-03-22)
 
 ### Summary

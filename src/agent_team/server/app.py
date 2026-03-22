@@ -38,6 +38,19 @@ async def websocket_endpoint(websocket: WebSocket):
         data = json.loads(raw)
         if data.get("type") == "start":
             team = AgentTeam(websocket, execution_path=data.get("execution_path"))
+
+            # Inject MCP tools if available
+            try:
+                from agent_team.mcp.registry import MCPRegistry
+                mcp_reg = MCPRegistry()
+                await mcp_reg.connect_all()
+                tools_prompt = mcp_reg.format_tools_prompt()
+                if tools_prompt:
+                    team.mcp_tools_prompt = tools_prompt
+                    team.mcp_registry = mcp_reg
+            except Exception:
+                pass
+
             mode = data.get("mode", "coding")
             await team.run(data["content"], mode=mode)
     except WebSocketDisconnect:
@@ -160,6 +173,29 @@ async def switch_provider(body: dict):
         }
     except ValueError as e:
         return {"error": str(e)}
+
+
+@app.get("/mcp/status")
+async def mcp_status():
+    """Get MCP server status and available tools."""
+    try:
+        from agent_team.mcp.registry import MCPRegistry
+        registry = MCPRegistry()
+        statuses = registry.get_statuses()
+        tools = registry.get_all_tools()
+        return {
+            "servers": [
+                {
+                    "name": s.name, "type": s.type,
+                    "connected": s.connected, "enabled": s.enabled,
+                    "tools": len(s.tools), "description": s.description,
+                }
+                for s in statuses
+            ],
+            "total_tools": len(tools),
+        }
+    except Exception:
+        return {"servers": [], "total_tools": 0}
 
 
 # Serve frontend static files

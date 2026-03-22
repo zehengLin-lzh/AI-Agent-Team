@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "data/memory.db"],
+      "description": "SQLite database management",
+      "triggers": ["database", "sql", "sqlite", "query", "table"],
+      "enabled": true
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "description": "Local file system access",
+      "triggers": ["file", "directory", "read file", "write file"],
+      "enabled": true
+    },
+    "git": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-git"],
+      "description": "Git repository operations",
+      "triggers": ["git", "commit", "branch", "diff"],
+      "enabled": false
+    },
+    "fetch": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "description": "Fetch and parse web pages",
+      "triggers": ["web", "fetch", "http", "url", "scrape"],
+      "enabled": false
+    }
+  }
+}

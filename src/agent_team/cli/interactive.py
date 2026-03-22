@@ -42,7 +42,7 @@ from websockets.exceptions import ConnectionClosedError
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.5.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -105,6 +105,8 @@ class CLIState:
     total_session_tokens: int = 0
     conversation_count: int = 0
     backend_connected: bool = False
+    mcp_registry: object | None = None  # MCPRegistry instance
+    skill_registry: object | None = None  # SkillRegistry instance
 
 state = CLIState()
 
@@ -326,6 +328,12 @@ def render_help():
         ("/history", "Show conversation history summary"),
         ("/plan <task>", "Submit a task in plan-only mode (no execution)"),
         ("/exec <task>", "Submit a task with execution enabled"),
+        ("/mcp", "List MCP servers, tools, and status"),
+        ("/mcp connect", "Connect to all configured MCP servers"),
+        ("/mcp add <name>", "Add a new MCP server (interactive setup)"),
+        ("/mcp search <query>", "Search for MCP servers by domain"),
+        ("/mcp tools", "List all available MCP tools"),
+        ("/skills", "List installed skills"),
         ("/exit, /quit", "Exit the CLI"),
     ]
     for cmd, desc in commands:
@@ -493,6 +501,19 @@ async def stream_conversation(
                             ),
                             title="[bold blue]\U0001f4da Memory Context[/]",
                             border_style="blue",
+                        ))
+
+                elif t == "tool_results":
+                    tools_executed = msg.get("tools_executed", [])
+                    if tools_executed:
+                        lines = []
+                        for tr in tools_executed:
+                            icon = "[green]\u2714[/]" if not tr.get("is_error") else "[red]\u2716[/]"
+                            lines.append(f"  {icon} {tr['tool']}: {tr['result'][:80]}")
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title="[bold]\U0001f527 MCP Tool Results[/]",
+                            border_style="green",
                         ))
 
                 elif t == "learning_complete":
@@ -756,6 +777,415 @@ def handle_mode_command(args: str):
         console.print(f"[error]Invalid mode '{args}'. Valid: {', '.join(VALID_MODES)}[/]")
 
 
+def _is_local_llm() -> bool:
+    """Check if the active LLM provider is a local provider."""
+    return state.llm_provider in ("ollama", "huggingface")
+
+
+async def _ensure_mcp_registry():
+    """Lazily initialize the MCP registry."""
+    if state.mcp_registry is None:
+        try:
+            from agent_team.mcp.registry import MCPRegistry
+            state.mcp_registry = MCPRegistry()
+        except Exception:
+            pass
+    return state.mcp_registry
+
+
+async def _ensure_skill_registry():
+    """Lazily initialize the skill registry."""
+    if state.skill_registry is None:
+        try:
+            from agent_team.skills.registry import SkillRegistry
+            state.skill_registry = SkillRegistry()
+        except Exception:
+            pass
+    return state.skill_registry
+
+
+async def handle_mcp_command(args: str):
+    """Handle /mcp commands.
+
+    Subcommands:
+      /mcp              — List all MCP servers and their status
+      /mcp add <name>   — Add a new MCP server (interactive)
+      /mcp remove <name> — Remove a server
+      /mcp connect      — Connect to all enabled servers
+      /mcp tools        — List all available tools
+      /mcp search <q>   — Search for MCP servers online
+      /mcp toggle <name> — Enable/disable a server
+    """
+    registry = await _ensure_mcp_registry()
+    if registry is None:
+        console.print("[error]MCP module not available.[/]")
+        return
+
+    parts = args.strip().split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+    subcmd_args = parts[1] if len(parts) > 1 else ""
+
+    if not subcmd:
+        # List all servers and status
+        from agent_team.mcp.config import MCPConfig
+        config = registry.config
+        servers = config.list_servers()
+
+        if not servers:
+            console.print(Panel(
+                "[dim]No MCP servers configured.\n\n"
+                "Add a local server:\n"
+                "  [bold]/mcp add <name>[/]\n\n"
+                "Or create [bold]mcp.json[/] in the project root.\n\n"
+                "Search for MCP servers:\n"
+                "  [bold]/mcp search database[/][/]",
+                title="[bold white]MCP Servers[/]",
+                border_style="cyan",
+            ))
+            return
+
+        table = Table(
+            title="MCP Servers",
+            title_style="bold white",
+            border_style="cyan",
+            header_style="bold cyan",
+        )
+        table.add_column("Server", style="bold")
+        table.add_column("Type", style="dim")
+        table.add_column("Status")
+        table.add_column("Tools", justify="right")
+        table.add_column("Description", style="dim")
+
+        statuses = registry.get_statuses()
+        status_map = {s.name: s for s in statuses}
+
+        for server in servers:
+            s = status_map.get(server.name)
+            if not server.enabled:
+                status_str = "[dim]\u25cb disabled[/]"
+            elif s and s.connected:
+                status_str = "[green]\u25cf connected[/]"
+            elif s and s.error:
+                status_str = f"[red]\u25cf {s.error[:30]}[/]"
+            else:
+                status_str = "[yellow]\u25cb not connected[/]"
+
+            tool_count = len(s.tools) if s else 0
+            type_str = "[cyan]stdio[/]" if server.type == "stdio" else "[yellow]sse[/]"
+
+            table.add_row(
+                server.name,
+                type_str,
+                status_str,
+                str(tool_count) if tool_count else "-",
+                server.description[:40] or "-",
+            )
+
+        console.print()
+        console.print(table)
+        console.print("\n[dim]Commands: /mcp connect | /mcp tools | /mcp add <name> | /mcp remove <name>[/]")
+        return
+
+    if subcmd == "connect":
+        console.print("[dim]Connecting to MCP servers...[/]")
+        statuses = await registry.connect_all()
+        for s in statuses:
+            if s.connected:
+                console.print(f"  [green]\u2714 {s.name}[/] — {len(s.tools)} tool(s)")
+            elif not s.enabled:
+                console.print(f"  [dim]\u25cb {s.name} (disabled)[/]")
+            else:
+                console.print(f"  [red]\u2716 {s.name}[/] — {s.error or 'failed'}")
+        return
+
+    if subcmd == "tools":
+        tools = registry.get_all_tools()
+        if not tools:
+            console.print("[warning]No tools available. Run /mcp connect first.[/]")
+            return
+
+        table = Table(
+            title="MCP Tools",
+            title_style="bold white",
+            border_style="green",
+            header_style="bold green",
+        )
+        table.add_column("Tool", style="bold cyan")
+        table.add_column("Server", style="dim")
+        table.add_column("Description", style="white")
+
+        for tool in tools:
+            table.add_row(tool.name, tool.server_name, tool.description[:60] or "-")
+
+        console.print()
+        console.print(table)
+        return
+
+    if subcmd == "add":
+        name = subcmd_args.strip()
+        if not name:
+            console.print("[warning]Usage: /mcp add <name>[/]")
+            return
+
+        console.print(f"\n[bold]Adding MCP server: [cyan]{name}[/][/]\n")
+
+        # Interactive setup
+        server_type = input("  Type (stdio/sse) [stdio]: ").strip() or "stdio"
+
+        if server_type == "sse":
+            if _is_local_llm():
+                console.print("[warning]Remote SSE servers are not fully supported with local LLMs.[/]")
+                console.print("[dim]Local LLMs cannot reliably decompose requests for remote tool calls.[/]")
+                console.print("[dim]Option 1: Switch to a frontier LLM (/llm openai)[/]")
+                console.print("[dim]Option 2: Download the MCP server source code and run it locally.[/]")
+                choice = input("  Continue anyway? (y/n) [n]: ").strip().lower()
+                if choice != "y":
+                    console.print("[dim]Cancelled.[/]")
+                    return
+
+            url = input("  Server URL: ").strip()
+            if not url:
+                console.print("[error]URL required for SSE servers.[/]")
+                return
+
+            from agent_team.mcp.config import MCPServerDef
+            server_def = MCPServerDef(
+                name=name, type="sse", url=url,
+                description=input("  Description: ").strip(),
+                triggers=[t.strip() for t in input("  Trigger keywords (comma-separated): ").split(",") if t.strip()],
+            )
+        else:
+            command = input("  Command (e.g., npx, uvx, python): ").strip()
+            if not command:
+                console.print("[error]Command required for stdio servers.[/]")
+                return
+
+            args_str = input("  Arguments (space-separated): ").strip()
+            args_list = args_str.split() if args_str else []
+
+            from agent_team.mcp.config import MCPServerDef
+            server_def = MCPServerDef(
+                name=name, type="stdio",
+                command=command, args=args_list,
+                description=input("  Description: ").strip(),
+                triggers=[t.strip() for t in input("  Trigger keywords (comma-separated): ").split(",") if t.strip()],
+            )
+
+        registry.config.add_server(server_def)
+        console.print(f"\n[success]\u2714 Server '{name}' added to mcp.json[/]")
+        console.print("[dim]Run /mcp connect to connect.[/]")
+        return
+
+    if subcmd == "remove":
+        name = subcmd_args.strip()
+        if not name:
+            console.print("[warning]Usage: /mcp remove <name>[/]")
+            return
+        if registry.config.remove_server(name):
+            await registry.disconnect_server(name)
+            console.print(f"[success]\u2714 Server '{name}' removed.[/]")
+        else:
+            console.print(f"[error]Server '{name}' not found.[/]")
+        return
+
+    if subcmd == "toggle":
+        name = subcmd_args.strip()
+        if not name:
+            console.print("[warning]Usage: /mcp toggle <name>[/]")
+            return
+        result = registry.config.toggle_server(name)
+        if result is None:
+            console.print(f"[error]Server '{name}' not found.[/]")
+        elif result:
+            console.print(f"[success]\u2714 Server '{name}' enabled.[/]")
+        else:
+            console.print(f"[dim]\u25cb Server '{name}' disabled.[/]")
+            await registry.disconnect_server(name)
+        return
+
+    if subcmd == "search":
+        query = subcmd_args.strip()
+        if not query:
+            console.print("[warning]Usage: /mcp search <query> (e.g., /mcp search database)[/]")
+            return
+
+        console.print(f"[dim]Searching for MCP servers related to '{query}'...[/]")
+        console.print()
+
+        # Show well-known MCP servers that match
+        known_servers = {
+            "database": [
+                ("sqlite", "uvx mcp-server-sqlite --db-path data/db.sqlite", "SQLite database management"),
+                ("postgres", "npx -y @modelcontextprotocol/server-postgres", "PostgreSQL database access"),
+            ],
+            "filesystem": [
+                ("filesystem", "npx -y @modelcontextprotocol/server-filesystem /path", "File system access"),
+            ],
+            "git": [
+                ("git", "uvx mcp-server-git", "Git repository operations"),
+                ("github", "npx -y @modelcontextprotocol/server-github", "GitHub API integration"),
+            ],
+            "web": [
+                ("fetch", "uvx mcp-server-fetch", "Fetch and parse web pages"),
+                ("brave-search", "npx -y @modelcontextprotocol/server-brave-search", "Web search via Brave"),
+            ],
+            "memory": [
+                ("memory", "npx -y @modelcontextprotocol/server-memory", "Knowledge graph memory"),
+            ],
+            "docker": [
+                ("docker", "npx -y @modelcontextprotocol/server-docker", "Docker container management"),
+            ],
+            "slack": [
+                ("slack", "npx -y @modelcontextprotocol/server-slack", "Slack messaging integration"),
+            ],
+            "search": [
+                ("brave-search", "npx -y @modelcontextprotocol/server-brave-search", "Web search via Brave"),
+            ],
+        }
+
+        query_lower = query.lower()
+        matches = []
+        for domain, servers in known_servers.items():
+            if query_lower in domain:
+                matches.extend(servers)
+
+        if matches:
+            table = Table(title=f"MCP Servers for '{query}'", border_style="cyan")
+            table.add_column("Name", style="bold cyan")
+            table.add_column("Command", style="dim")
+            table.add_column("Description")
+
+            for name, cmd, desc in matches:
+                table.add_row(name, cmd, desc)
+
+            console.print(table)
+            console.print("\n[dim]To add a server: /mcp add <name>[/]")
+            console.print("[dim]For more servers: https://github.com/modelcontextprotocol/servers[/]")
+        else:
+            console.print(f"[dim]No built-in suggestions for '{query}'.[/]")
+            console.print("[dim]Browse available servers: https://github.com/modelcontextprotocol/servers[/]")
+            console.print("[dim]Or search: https://mcp-registry.com[/]")
+        return
+
+    console.print(f"[warning]Unknown subcommand: /mcp {subcmd}[/]")
+    console.print("[dim]Available: /mcp, /mcp connect, /mcp tools, /mcp add, /mcp remove, /mcp search, /mcp toggle[/]")
+
+
+async def handle_skills_command(args: str):
+    """Handle /skills command — list and manage skills."""
+    registry = await _ensure_skill_registry()
+
+    if registry is None:
+        console.print("[error]Skills module not available.[/]")
+        return
+
+    parts = args.strip().split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+
+    if not subcmd:
+        # List all skills
+        skills = registry.list_skills()
+        if not skills:
+            console.print(Panel(
+                "[dim]No skills installed.\n\n"
+                "Skills are SKILL.md files in the [bold]skills/[/] directory.\n"
+                "Each skill provides domain-specific knowledge to agents.[/]",
+                title="[bold white]Skills[/]",
+                border_style="cyan",
+            ))
+            return
+
+        table = Table(
+            title="Installed Skills",
+            title_style="bold white",
+            border_style="cyan",
+            header_style="bold cyan",
+        )
+        table.add_column("Skill", style="bold")
+        table.add_column("Mode", style="cyan")
+        table.add_column("Description", style="white")
+        table.add_column("Agents", style="dim")
+
+        for skill in skills:
+            table.add_row(
+                skill["name"],
+                skill["mode"],
+                skill["description"][:50] or "-",
+                ", ".join(skill.get("allowed_agents", []))[:30],
+            )
+
+        console.print()
+        console.print(table)
+        console.print("\n[dim]Skills provide domain knowledge to agents during conversations.[/]")
+        return
+
+    if subcmd == "reload":
+        registry.reload()
+        count = len(registry.list_skills())
+        console.print(f"[success]\u2714 Reloaded {count} skill(s) from disk.[/]")
+        return
+
+    console.print(f"[warning]Unknown: /skills {subcmd}. Try /skills or /skills reload[/]")
+
+
+async def check_tool_triggers(text: str) -> bool:
+    """Check if user input triggers MCP/skills suggestions. Returns True if suggestions were shown."""
+    registry = await _ensure_mcp_registry()
+    skill_reg = await _ensure_skill_registry()
+    if registry is None and skill_reg is None:
+        return False
+
+    try:
+        from agent_team.mcp.triggers import suggest_tools_for_request
+        skills_list = skill_reg.list_skills() if skill_reg else []
+        result = suggest_tools_for_request(text, registry.config if registry else None, skills_list)
+
+        suggestions = result.get("suggestions", [])
+        if not suggestions:
+            return False
+
+        # Only show suggestions with reasonable confidence
+        good_suggestions = [s for s in suggestions if s["confidence"] >= 0.3]
+        if not good_suggestions:
+            return False
+
+        console.print()
+        lines = []
+        for s in good_suggestions[:3]:
+            if s["type"] == "mcp":
+                icon = "\U0001f50c"  # 🔌
+                prefix = f"MCP server [bold cyan]{s['name']}[/]"
+            elif s["type"] == "skill":
+                icon = "\U0001f4da"  # 📚
+                prefix = f"Skill [bold green]{s['name']}[/]"
+            else:
+                icon = "\U0001f4a1"  # 💡
+                prefix = f"[bold yellow]{s['name']}[/]"
+            lines.append(f"  {icon} {prefix} — {s['reason']}")
+
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold]\U0001f50d Tool Suggestions[/]",
+            border_style="yellow",
+        ))
+
+        # Only ask if MCP servers matched and are connected
+        mcp_matches = [s for s in good_suggestions if s["type"] == "mcp"]
+        if mcp_matches and registry:
+            connected_tools = registry.get_all_tools()
+            relevant = [t for t in connected_tools
+                        if any(m["name"] == t.server_name for m in mcp_matches)]
+            if relevant:
+                choice = input("  Use these MCP tools? (y/n) [y]: ").strip().lower()
+                if choice in ("", "y", "yes"):
+                    return True  # Signal to inject tools into prompt
+
+        return False
+
+    except Exception:
+        return False
+
+
 def auto_detect_mode(text: str) -> str:
     """Auto-detect the best mode based on input keywords."""
     lower = text.lower()
@@ -930,6 +1360,12 @@ async def main():
                 elif cmd == "/mode":
                     handle_mode_command(args)
 
+                elif cmd == "/mcp":
+                    await handle_mcp_command(args)
+
+                elif cmd == "/skills":
+                    await handle_skills_command(args)
+
                 elif cmd == "/status":
                     await check_backend()
                     render_status_bar()
@@ -996,6 +1432,9 @@ async def main():
             detected_mode = auto_detect_mode(user_input)
             if detected_mode != state.mode:
                 console.print(f"[dim]Auto-detected mode: {MODE_ICONS.get(detected_mode, '')} {detected_mode}[/]")
+
+            # Check for MCP/skills triggers
+            await check_tool_triggers(user_input)
 
             # Confirm before proceeding
             proceed, exec_path, plan_only = await confirm_execution(user_input, detected_mode)

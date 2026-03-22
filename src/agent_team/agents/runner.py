@@ -25,6 +25,8 @@ class AgentTeam:
         self.original_plan = ""
         self.mode = AgentMode.CODING
         self.memory_context = ""
+        self.mcp_tools_prompt = ""  # MCP tool descriptions to inject into prompts
+        self.mcp_registry = None    # MCPRegistry reference for tool execution
         self.token_tracker = SessionTokenTracker()
 
     async def send_status(self, message: str, phase: str = ""):
@@ -37,6 +39,11 @@ class AgentTeam:
     async def run_agent(self, agent_name: str) -> str:
         """Run a single agent and store its output."""
         system_prompt = get_agent_prompt(agent_name, self.mode)
+
+        # Inject MCP tool descriptions into system prompt for agents that can use them
+        if self.mcp_tools_prompt and agent_name in ("THINKER", "PLANNER", "EXECUTOR"):
+            system_prompt += "\n\n" + self.mcp_tools_prompt
+
         temperature = MODE_TEMPERATURES.get(self.mode, 0.3)
         messages = build_context_for_agent(
             agent_name, self.phase_outputs, self.original_plan,
@@ -55,6 +62,22 @@ class AgentTeam:
             temperature=temperature,
             token_tracker=self.token_tracker,
         )
+
+        # Execute any MCP tool calls found in the output
+        if self.mcp_registry and "TOOL_CALL:" in output:
+            try:
+                from agent_team.mcp.tool_executor import execute_tool_calls
+                updated_output, exec_log = await execute_tool_calls(output, self.mcp_registry)
+                if exec_log:
+                    output = updated_output
+                    await self.ws.send_json({
+                        "type": "tool_results",
+                        "agent": agent_name,
+                        "tools_executed": exec_log,
+                    })
+            except Exception:
+                pass
+
         self.phase_outputs[agent_name] = output
         return output
 
@@ -189,6 +212,29 @@ class AgentTeam:
             self.mode = AgentMode.CODING
 
         try:
+            # Pre-session: check MCP tools (skip remote tools for local LLMs)
+            if self.mcp_registry and self.mcp_tools_prompt:
+                try:
+                    from agent_team.llm.registry import get_active_provider_name
+                    provider = get_active_provider_name()
+                    if provider in ("ollama", "huggingface"):
+                        # Local LLM — only include tools from stdio servers
+                        from agent_team.mcp.config import MCPConfig
+                        config = self.mcp_registry.config
+                        remote_servers = [
+                            s.name for s in config.list_servers() if s.is_remote
+                        ]
+                        if remote_servers:
+                            await self.ws.send_json({
+                                "type": "status",
+                                "message": f"Skipping remote MCP servers ({', '.join(remote_servers)}) — "
+                                           f"not supported with local LLM ({provider}). "
+                                           f"Use a frontier LLM or download the server source code.",
+                                "phase": "setup",
+                            })
+                except Exception:
+                    pass
+
             # Pre-session: query memory for relevant context
             try:
                 from agent_team.memory.search import HybridSearch
