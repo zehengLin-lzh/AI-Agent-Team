@@ -180,6 +180,8 @@ Starts:
 | `/mcp add <name>` | Add a new MCP server (interactive) |
 | `/mcp search <query>` | Search for MCP servers by domain |
 | `/skills` | List installed skills |
+| `/ask <question>` | Ask a single question (direct LLM, no agents) |
+| `/chat` | Enter chat mode (direct LLM conversation, stateless) |
 | `/plan <task>` | Plan-only mode (no execution) |
 | `/exec <task>` | Plan + execute with directory selection |
 | `/clear` | Clear screen |

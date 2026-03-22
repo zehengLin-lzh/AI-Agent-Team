@@ -42,7 +42,7 @@ from websockets.exceptions import ConnectionClosedError
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -326,6 +326,8 @@ def render_help():
         ("/tokens", "Show token usage for the current session"),
         ("/clear", "Clear the screen"),
         ("/history", "Show conversation history summary"),
+        ("/ask <question>", "Ask a single question (direct LLM call, no agents)"),
+        ("/chat", "Enter chat mode (direct LLM conversation, stateless)"),
         ("/plan <task>", "Submit a task in plan-only mode (no execution)"),
         ("/exec <task>", "Submit a task with execution enabled"),
         ("/mcp", "List MCP servers, tools, and status"),
@@ -1128,6 +1130,121 @@ async def handle_skills_command(args: str):
     console.print(f"[warning]Unknown: /skills {subcmd}. Try /skills or /skills reload[/]")
 
 
+async def handle_chat_mode(initial_message: str = ""):
+    """Enter interactive chat mode — direct conversation with the LLM.
+    Each session is stateless (no memory context carried over)."""
+    console.print()
+    console.print(Panel(
+        f"[bold white]Chat Mode[/] — Direct conversation with [cyan]{state.llm_provider}/{state.model}[/]\n\n"
+        "[dim]This is a stateless chat — no memory or context is carried between messages.\n"
+        "Each message is an independent conversation.\n\n"
+        "Type [bold]/back[/] or [bold]/exit[/] to return to the main CLI.[/]",
+        title="[bold]\U0001f4ac Chat[/]",
+        border_style="cyan",
+    ))
+
+    # Use call_llm directly (bypasses backend WebSocket)
+    from agent_team.llm import call_llm
+    from agent_team.llm.registry import get_active_provider_name
+
+    system_prompt = (
+        "You are a helpful AI assistant. Answer questions clearly and concisely. "
+        "If the user asks for code, provide well-formatted code with explanations."
+    )
+
+    session = PromptSession(style=pt_style)
+
+    # Process initial message if provided
+    if initial_message:
+        await _chat_send(initial_message, system_prompt, call_llm)
+
+    while True:
+        try:
+            user_input = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: session.prompt(
+                    HTML(f'<style fg="#00d4aa" bold="true">{state.llm_provider} \u276f </style>'),
+                    bottom_toolbar=lambda: HTML(
+                        f'<style bg="#1a1a2e" fg="#aaaaaa"> Chat Mode | '
+                        f'{state.llm_provider}/{state.model} | '
+                        f'/back to return </style>'
+                    ),
+                ),
+            )
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            if user_input.lower() in ("/back", "/exit", "/quit", "/q"):
+                console.print("[dim]Returning to main CLI...[/]\n")
+                break
+
+            if user_input.lower() == "/clear":
+                console.clear()
+                continue
+
+            await _chat_send(user_input, system_prompt, call_llm)
+
+        except KeyboardInterrupt:
+            console.print("\n[dim]Type /back to return to main CLI[/]")
+            continue
+        except EOFError:
+            console.print("[dim]Returning to main CLI...[/]\n")
+            break
+
+
+async def _chat_send(message: str, system_prompt: str, call_fn):
+    """Send a single chat message and display the response."""
+    console.print(f"\n[dim]Thinking...[/]", end="")
+
+    try:
+        response = await call_fn(
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": message}],
+            temperature=0.5,
+        )
+        # Clear the "Thinking..." line
+        console.print("\r", end="")
+
+        if response.strip():
+            console.print()
+            console.print(Panel(
+                Markdown(response),
+                border_style="dim cyan",
+                padding=(1, 2),
+            ))
+        else:
+            console.print("\r[warning]No response from LLM. Check provider/model.[/]")
+
+    except Exception as e:
+        console.print(f"\r[error]Error: {e}[/]")
+
+    console.print("[dim]---[/] [dim italic]New message = new conversation (no context carried over)[/]")
+    console.print()
+
+
+async def handle_ask_command(question: str):
+    """Handle /ask — single question, single answer. Stateless."""
+    if not question:
+        console.print("[warning]Usage: /ask <your question>[/]")
+        return
+
+    console.print()
+    console.print(Panel(
+        f"[dim]Asking [cyan]{state.llm_provider}/{state.model}[/] (no context, single response)[/]",
+        title="[bold]\u2753 Ask[/]",
+        border_style="cyan",
+    ))
+
+    from agent_team.llm import call_llm
+
+    await _chat_send(question, (
+        "You are a helpful AI assistant. Answer the question clearly and concisely. "
+        "Provide well-formatted answers with code examples where appropriate."
+    ), call_llm)
+
+
 async def check_tool_triggers(text: str) -> bool:
     """Check if user input triggers MCP/skills suggestions. Returns True if suggestions were shown."""
     registry = await _ensure_mcp_registry()
@@ -1382,6 +1499,12 @@ async def main():
                 elif cmd == "/history":
                     console.print(f"[dim]Conversations this session: {state.conversation_count}[/]")
                     console.print(f"[dim]Total tokens used: {state.total_session_tokens}[/]")
+
+                elif cmd == "/ask":
+                    await handle_ask_command(args)
+
+                elif cmd == "/chat":
+                    await handle_chat_mode(args)
 
                 elif cmd == "/plan":
                     if not args:

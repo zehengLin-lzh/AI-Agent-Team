@@ -2,6 +2,31 @@
 
 ---
 
+## v2.5.1 — Ask & Chat Modes (2026-03-22)
+
+### Summary
+
+Added `/ask` and `/chat` commands for direct LLM conversations without the full agent pipeline. These bypass the 5-agent orchestration and call the active LLM provider directly.
+
+### How It Works
+
+- `/ask <question>` — Single question, single answer. No agents, no planning, no execution. Just a direct LLM call.
+- `/chat` — Enters a dedicated chat REPL. Each message is an independent conversation (stateless, no memory context carried between messages). Type `/back` to return to the main CLI.
+
+Both modes use the active LLM provider and model (switchable via `/llm` and `/model`).
+
+### Why Stateless?
+
+Each chat message is a fresh conversation — no context is carried over between messages. This is clearly communicated to the user on entry. This keeps the implementation simple and avoids confusion about what the LLM "remembers."
+
+### Modified Files
+
+| File | What changed |
+|---|---|
+| `src/agent_team/cli/interactive.py` | Added `handle_chat_mode()`, `handle_ask_command()`, `_chat_send()`, command routing for `/ask` and `/chat` |
+
+---
+
 ## v2.5.0 — MCP & Skills Integration (2026-03-22)
 
 ### Summary
