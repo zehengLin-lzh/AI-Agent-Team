@@ -1,0 +1,54 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Package manager ──────────────────────────────────────
+# Keep uv.lock for reproducible builds
+# uv.lock
+
+# ── IDE / Editor ─────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ── macOS ────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ── Runtime data (generated, user-specific) ──────────────
+data/
+plans/
+
+# ── Agent Team config (may contain user-specific paths) ──
+agent_team.config.json
+
+# ── Environment / secrets ────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+logs/

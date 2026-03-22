@@ -1,0 +1,11 @@
+#!/bin/bash
+# mat-agent — convenience launcher for the Agent Team (backend + UI)
+# Run this from anywhere once this script is on your PATH.
+
+set -euo pipefail
+
+_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$_SOURCE" ]]; do _SOURCE="$(readlink "$_SOURCE")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SOURCE")" && pwd)"
+
+exec "$SCRIPT_DIR/start.sh"

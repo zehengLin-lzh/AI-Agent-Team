@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Team</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #0d0d12;
+    --surface: #13131a;
+    --surface2: #1a1a24;
+    --border: #1f1f2e;
+    --border2: #2a2a3d;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --accent: #00ffaa;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    grid-template-rows: 52px 1fr;
+    overflow: hidden;
+  }
+
+  /* ── Header ─────────────────── */
+  header {
+    grid-column: 1 / -1;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+  }
+
+  .logo {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 1px;
+  }
+
+  .header-status {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+  }
+
+  .header-status.active { color: var(--accent); }
+
+  .model-badge {
+    margin-left: auto;
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    padding: 3px 8px;
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--muted);
+  }
+
+  /* ── Sidebar ─────────────────── */
+  aside {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .phase-nav {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .phase-label {
+    font-size: 9px;
+    font-family: 'Space Mono', monospace;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 8px 8px 4px;
+  }
+
+  .agent-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid transparent;
+  }
+
+  .agent-item:hover { background: var(--surface2); }
+  .agent-item.active { background: var(--surface2); border-color: var(--border2); }
+
+  .agent-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+
+  .agent-dot.running {
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  .agent-dot.done {
+    background: #22c55e !important;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .agent-name {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    transition: color 0.2s;
+  }
+
+  .agent-item.active .agent-name { color: var(--text); }
+
+  .agent-badge {
+    margin-left: auto;
+    font-size: 9px;
+    font-family: 'Space Mono', monospace;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--border);
+  }
+
+  /* ── Main area ─────────────────── */
+  main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Output stream */
+  #output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    scroll-behavior: smooth;
+  }
+
+  #output::-webkit-scrollbar { width: 4px; }
+  #output::-webkit-scrollbar-track { background: transparent; }
+  #output::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  /* Welcome state */
+  .welcome {
+    margin: auto;
+    text-align: center;
+    opacity: 0.4;
+  }
+
+  .welcome h2 {
+    font-family: 'Space Mono', monospace;
+    font-size: 1.2rem;
+    margin-bottom: 8px;
+  }
+
+  .welcome p {
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+
+  /* Agent blocks */
+  .agent-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    animation: slideIn 0.2s ease;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .agent-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .agent-header-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .agent-header-name {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .agent-header-phase {
+    font-size: 10px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+  }
+
+  .agent-header-toggle {
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+  }
+
+  .agent-content {
+    padding: 14px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+
+  .agent-content.collapsed { display: none; }
+
+  .agent-content::-webkit-scrollbar { width: 3px; }
+  .agent-content::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  /* Syntax colors in output */
+  .agent-content .c-green { color: #4ade80; }
+  .agent-content .c-yellow { color: #fbbf24; }
+  .agent-content .c-red { color: #f87171; }
+  .agent-content .c-blue { color: #60a5fa; }
+  .agent-content .c-purple { color: #a78bfa; }
+
+  /* Status bar */
+  .status-bar {
+    padding: 6px 14px;
+    font-size: 11px;
+    font-family: 'Space Mono', monospace;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .status-bar .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .status-bar .status-dot.active {
+    background: var(--accent);
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  /* User question popup */
+  .question-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+
+  .question-box {
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 500px;
+    width: 90%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+
+  .question-box .from {
+    font-size: 10px;
+    font-family: 'Space Mono', monospace;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .question-box .q-text {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin-bottom: 16px;
+    color: var(--text);
+  }
+
+  .question-box textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 10px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    resize: vertical;
+    min-height: 80px;
+    outline: none;
+  }
+
+  .question-box textarea:focus { border-color: var(--accent); }
+
+  .question-box button {
+    margin-top: 10px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    width: 100%;
+    font-family: 'Inter', sans-serif;
+  }
+
+  /* Input area */
+  .input-area {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    padding: 16px;
+  }
+
+  .input-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  textarea#plan-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 12px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    resize: none;
+    min-height: 72px;
+    max-height: 200px;
+    outline: none;
+    line-height: 1.6;
+    transition: border-color 0.2s;
+  }
+
+  textarea#plan-input:focus { border-color: var(--accent); }
+  textarea#plan-input::placeholder { color: var(--muted); }
+
+  .run-btn {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: 'Space Mono', monospace;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    transition: opacity 0.2s;
+    height: 72px;
+  }
+
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .run-btn:not(:disabled):hover { opacity: 0.85; }
+
+  .hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+    font-family: 'Space Mono', monospace;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">⬡ AGENT TEAM v2</div>
+  <div class="header-status" id="header-status">ready</div>
+  <select id="mode-select" style="background:var(--bg);color:var(--text);border:1px solid var(--border2);border-radius:4px;padding:3px 8px;font-family:'Space Mono',monospace;font-size:10px;outline:none;">
+    <option value="coding">coding</option>
+    <option value="thinking">thinking</option>
+    <option value="brainstorming">brainstorming</option>
+    <option value="architecture">architecture</option>
+    <option value="execution">execution</option>
+  </select>
+  <div class="model-badge" id="model-badge">checking...</div>
+</header>
+
+<aside>
+  <div class="phase-nav" id="agent-nav">
+    <!-- Populated by JS -->
+  </div>
+</aside>
+
+<main>
+  <div id="output">
+    <div class="welcome">
+      <h2>// agent team v2</h2>
+      <p>Self-learning AI agent platform.<br>Select a mode above and describe your task below.</p>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text">idle — waiting for a plan</span>
+  </div>
+
+  <div class="input-area">
+    <div class="input-row">
+      <textarea id="plan-input" placeholder="Describe your technical plan...&#10;&#10;Example: Build a user auth system with Next.js frontend, JWT API with refresh tokens, PostgreSQL, and protected routes." rows="3"></textarea>
+      <button class="run-btn" id="run-btn" onclick="startRun()">RUN<br>TEAM</button>
+    </div>
+    <div class="hint">Shift+Enter for new line — Enter to submit</div>
+  </div>
+</main>
+
+<!-- Agent question overlay (hidden by default) -->
+<div class="question-overlay" id="question-overlay" style="display:none">
+  <div class="question-box">
+    <div class="from" id="question-from">// ORCHESTRATOR asking</div>
+    <div class="q-text" id="question-text"></div>
+    <textarea id="question-answer" placeholder="Your answer..."></textarea>
+    <button onclick="submitAnswer()">Send Answer →</button>
+  </div>
+</div>
+
+<script>
+// ── Agent definitions (mirrors backend) ───────────────────────────────────────
+const AGENTS = {
+  ORCHESTRATOR:  { color: '#00ffaa', phase: 'INTAKE',   label: 'intake' },
+  THINKER:       { color: '#a78bfa', phase: 'THINK',    label: 'think' },
+  PLANNER:       { color: '#fbbf24', phase: 'PLAN',     label: 'plan' },
+  EXECUTOR:      { color: '#34d399', phase: 'EXECUTE',  label: 'execute' },
+  REVIEWER:      { color: '#f472b6', phase: 'VERIFY',   label: 'verify' },
+  MEMORY_AGENT:  { color: '#60a5fa', phase: 'MEMORY',   label: 'memory' },
+  LEARNER:       { color: '#94a3b8', phase: 'LEARN',    label: 'learn' },
+};
+
+const PHASES = [
+  { key: 'INTAKE',   label: '01 · INTAKE',   agents: ['ORCHESTRATOR'] },
+  { key: 'THINK',    label: '02 · THINK',    agents: ['THINKER'] },
+  { key: 'PLAN',     label: '03 · PLAN',     agents: ['PLANNER'] },
+  { key: 'EXECUTE',  label: '04 · EXECUTE',  agents: ['EXECUTOR'] },
+  { key: 'VERIFY',   label: '05 · VERIFY',   agents: ['REVIEWER'] },
+];
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws = null;
+let running = false;
+let pendingAnswerResolve = null;
+let agentBlocks = {};        // agent → DOM element
+let agentStates = {};        // agent → 'idle' | 'running' | 'done'
+let currentScrollBottom = true;
+
+// ── Build sidebar ─────────────────────────────────────────────────────────────
+function buildNav() {
+  const nav = document.getElementById('agent-nav');
+  PHASES.forEach(phase => {
+    const label = document.createElement('div');
+    label.className = 'phase-label';
+    label.textContent = phase.label;
+    nav.appendChild(label);
+
+    phase.agents.forEach(name => {
+      const item = document.createElement('div');
+      item.className = 'agent-item';
+      item.id = `nav-${name}`;
+      item.onclick = () => scrollToAgent(name);
+
+      const dot = document.createElement('div');
+      dot.className = 'agent-dot';
+      dot.id = `dot-${name}`;
+      dot.style.background = AGENTS[name].color;
+      dot.style.opacity = '0.3';
+
+      const label = document.createElement('div');
+      label.className = 'agent-name';
+      label.textContent = name.replace('_', ' ');
+
+      item.appendChild(dot);
+      item.appendChild(label);
+      nav.appendChild(item);
+      agentStates[name] = 'idle';
+    });
+  });
+}
+
+// ── Sidebar state updates ─────────────────────────────────────────────────────
+function setAgentState(name, state) {
+  agentStates[name] = state;
+  const dot = document.getElementById(`dot-${name}`);
+  const nav = document.getElementById(`nav-${name}`);
+  if (!dot) return;
+
+  dot.className = 'agent-dot';
+  if (state === 'running') {
+    dot.style.opacity = '1';
+    dot.classList.add('running');
+    nav.classList.add('active');
+  } else if (state === 'done') {
+    dot.style.opacity = '1';
+    dot.classList.add('done');
+    dot.style.background = '#22c55e';
+    nav.classList.remove('active');
+  } else {
+    dot.style.opacity = '0.3';
+    dot.style.background = AGENTS[name].color;
+  }
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+function setStatus(text, active = false) {
+  document.getElementById('status-text').textContent = text;
+  document.getElementById('status-dot').className = 'status-dot' + (active ? ' active' : '');
+  document.getElementById('header-status').textContent = active ? text : 'ready';
+  document.getElementById('header-status').className = 'header-status' + (active ? ' active' : '');
+}
+
+// ── Agent output blocks ───────────────────────────────────────────────────────
+function getOrCreateBlock(agentName) {
+  if (agentBlocks[agentName]) return agentBlocks[agentName];
+
+  // Remove welcome message
+  const welcome = document.querySelector('.welcome');
+  if (welcome) welcome.remove();
+
+  const block = document.createElement('div');
+  block.className = 'agent-block';
+  block.id = `block-${agentName}`;
+
+  const cfg = AGENTS[agentName];
+
+  const header = document.createElement('div');
+  header.className = 'agent-header';
+  header.innerHTML = `
+    <div class="agent-header-dot" style="background:${cfg.color}"></div>
+    <div class="agent-header-name" style="color:${cfg.color}">${agentName}</div>
+    <div class="agent-header-phase">${cfg.label}</div>
+    <div class="agent-header-toggle" id="toggle-${agentName}">[−]</div>
+  `;
+  header.onclick = () => toggleBlock(agentName);
+
+  const content = document.createElement('div');
+  content.className = 'agent-content';
+  content.id = `content-${agentName}`;
+
+  block.appendChild(header);
+  block.appendChild(content);
+  document.getElementById('output').appendChild(block);
+
+  agentBlocks[agentName] = block;
+  return block;
+}
+
+function appendToken(agentName, token) {
+  getOrCreateBlock(agentName);
+  const content = document.getElementById(`content-${agentName}`);
+
+  // Color certain patterns
+  let colored = token
+    .replace(/✅/g, '<span class="c-green">✅</span>')
+    .replace(/❌/g, '<span class="c-red">❌</span>')
+    .replace(/⚠️/g, '<span class="c-yellow">⚠️</span>')
+    .replace(/\[HIGH\]/g, '<span class="c-red">[HIGH]</span>')
+    .replace(/\[MED\]/g, '<span class="c-yellow">[MED]</span>')
+    .replace(/\[LOW\]/g, '<span class="c-blue">[LOW]</span>')
+    .replace(/(--- FILE:.*?---)/g, '<span class="c-green">$1</span>')
+    .replace(/(→ Routing to:.*)/g, '<span class="c-purple">$1</span>');
+
+  content.innerHTML += colored;
+
+  if (currentScrollBottom) {
+    const out = document.getElementById('output');
+    out.scrollTop = out.scrollHeight;
+  }
+}
+
+function toggleBlock(agentName) {
+  const content = document.getElementById(`content-${agentName}`);
+  const toggle = document.getElementById(`toggle-${agentName}`);
+  content.classList.toggle('collapsed');
+  toggle.textContent = content.classList.contains('collapsed') ? '[+]' : '[−]';
+}
+
+function scrollToAgent(name) {
+  const block = agentBlocks[name];
+  if (block) block.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function startRun() {
+  const input = document.getElementById('plan-input');
+  const plan = input.value.trim();
+  if (!plan || running) return;
+
+  running = true;
+  agentBlocks = {};
+
+  // Reset nav dots
+  Object.keys(AGENTS).forEach(name => setAgentState(name, 'idle'));
+
+  document.getElementById('run-btn').disabled = true;
+  input.disabled = true;
+
+  // Clear output
+  const out = document.getElementById('output');
+  out.innerHTML = '';
+
+  ws = new WebSocket('ws://localhost:8000/ws');
+
+  ws.onopen = () => {
+    const mode = document.getElementById('mode-select').value;
+    setStatus(`connecting (${mode} mode)...`, true);
+    ws.send(JSON.stringify({ type: 'start', content: plan, mode: mode }));
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === 'agent_start') {
+      setAgentState(msg.agent, 'running');
+      setStatus(`${msg.agent} is working...`, true);
+      getOrCreateBlock(msg.agent);
+      document.getElementById(`nav-${msg.agent}`)?.scrollIntoView({ block: 'nearest' });
+    }
+    else if (msg.type === 'token') {
+      appendToken(msg.agent, msg.content);
+    }
+    else if (msg.type === 'agent_done') {
+      setAgentState(msg.agent, 'done');
+    }
+    else if (msg.type === 'status') {
+      setStatus(msg.message, true);
+    }
+    else if (msg.type === 'waiting_for_user') {
+      showQuestion(msg.agent, msg.question);
+    }
+    else if (msg.type === 'memory_context') {
+      const results = msg.results || [];
+      if (results.length > 0) {
+        setStatus(`Found ${results.length} relevant memory chunk(s)`, true);
+        const out = document.getElementById('output');
+        const el = document.createElement('div');
+        el.style.cssText = 'background:#0a1a1a;border:1px solid #1a3a3a;border-radius:8px;padding:14px;font-family:Space Mono,monospace;font-size:11px;color:#60a5fa;margin-bottom:8px;';
+        el.innerHTML = '<strong>Memory context loaded</strong><br>' +
+          results.slice(0, 3).map(r => `[${r.source}] ${(r.content || '').substring(0, 80)}...`).join('<br>');
+        out.appendChild(el);
+      }
+    }
+    else if (msg.type === 'learning_complete') {
+      const patterns = msg.patterns_extracted || 0;
+      if (patterns > 0) {
+        const out = document.getElementById('output');
+        const el = document.createElement('div');
+        el.style.cssText = 'background:#0a1a0a;border:1px solid #1a3a1a;border-radius:8px;padding:10px;font-family:Space Mono,monospace;font-size:11px;color:#4ade80;';
+        el.textContent = `Learned ${patterns} new pattern(s) from this session.`;
+        out.appendChild(el);
+      }
+    }
+    else if (msg.type === 'error') {
+      showError(msg.content);
+    }
+    else if (msg.type === 'complete') {
+      setStatus('delivery complete', false);
+      running = false;
+      document.getElementById('run-btn').disabled = false;
+      input.disabled = false;
+      ws.close();
+    }
+  };
+
+  ws.onerror = () => {
+    showError('Cannot connect to backend. Is it running? Run: uvicorn main:app --reload');
+    running = false;
+    document.getElementById('run-btn').disabled = false;
+    input.disabled = false;
+  };
+
+  ws.onclose = () => {
+    if (running) {
+      setStatus('connection closed', false);
+      running = false;
+      document.getElementById('run-btn').disabled = false;
+      input.disabled = false;
+    }
+  };
+}
+
+// ── User question modal ───────────────────────────────────────────────────────
+function showQuestion(agentName, question) {
+  document.getElementById('question-from').textContent = `// ${agentName} needs clarification`;
+  document.getElementById('question-text').textContent = question;
+  document.getElementById('question-answer').value = '';
+  document.getElementById('question-overlay').style.display = 'flex';
+  document.getElementById('question-answer').focus();
+}
+
+function submitAnswer() {
+  const answer = document.getElementById('question-answer').value.trim();
+  if (!answer) return;
+  document.getElementById('question-overlay').style.display = 'none';
+  ws.send(JSON.stringify({ type: 'user_reply', content: answer }));
+  setStatus('processing your answer...', true);
+}
+
+// ── Error display ─────────────────────────────────────────────────────────────
+function showError(msg) {
+  const out = document.getElementById('output');
+  const el = document.createElement('div');
+  el.style.cssText = 'background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:14px;font-family:Space Mono,monospace;font-size:12px;color:#fca5a5;';
+  el.textContent = `ERROR: ${msg}`;
+  out.appendChild(el);
+  setStatus('error', false);
+  running = false;
+  document.getElementById('run-btn').disabled = false;
+  document.getElementById('plan-input').disabled = false;
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.getElementById('plan-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    startRun();
+  }
+});
+
+document.getElementById('question-answer').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitAnswer();
+  }
+});
+
+// Track scroll position
+document.getElementById('output').addEventListener('scroll', (e) => {
+  const el = e.target;
+  currentScrollBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+});
+
+// ── Health check ──────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch('http://localhost:8000/health');
+    const data = await r.json();
+    const badge = document.getElementById('model-badge');
+    if (data.model_available) {
+      badge.textContent = data.model;
+      badge.style.color = '#00ffaa';
+    } else {
+      badge.textContent = `${data.model} (not pulled)`;
+      badge.style.color = '#fbbf24';
+    }
+  } catch {
+    document.getElementById('model-badge').textContent = 'backend offline';
+    document.getElementById('model-badge').style.color = '#f87171';
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+buildNav();
+checkHealth();
+</script>
+</body>
+</html>

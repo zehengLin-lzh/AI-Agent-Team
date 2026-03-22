@@ -1,0 +1,23 @@
+#!/bin/bash
+# mat-agent-cli — launch the Agent Team interactive CLI
+# Usage:
+#   mat-agent-cli              # interactive mode (default)
+#   mat-agent-cli --classic    # classic non-interactive CLI
+#
+# Run this from anywhere once it is on your PATH.
+
+set -euo pipefail
+
+_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$_SOURCE" ]]; do _SOURCE="$(readlink "$_SOURCE")"; done
+REPO_ROOT="$(cd "$(dirname "$_SOURCE")/.." && pwd)"
+cd "$REPO_ROOT"
+
+export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
+
+if [[ "${1:-}" == "--classic" ]]; then
+  shift
+  exec uv run python -m agent_team.cli.classic "$@"
+else
+  exec uv run python -m agent_team.cli.interactive "$@"
+fi

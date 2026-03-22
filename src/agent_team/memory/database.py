@@ -1,0 +1,213 @@
+"""SQLite database for memory system with vector search support."""
+import sqlite3
+import struct
+import uuid
+from pathlib import Path
+from datetime import datetime
+from agent_team.config import MEMORY_DB_PATH, DATA_DIR
+from agent_team.memory.types import MemoryEntry, LearnedPattern
+
+
+def _ensure_data_dir():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _serialize_embedding(embedding: list[float]) -> bytes:
+    """Serialize embedding to bytes for SQLite storage."""
+    return struct.pack(f"{len(embedding)}f", *embedding)
+
+
+def _deserialize_embedding(data: bytes) -> list[float]:
+    """Deserialize embedding from bytes."""
+    n = len(data) // 4
+    return list(struct.unpack(f"{n}f", data))
+
+
+class MemoryDB:
+    def __init__(self, db_path: Path | None = None):
+        _ensure_data_dir()
+        self.db_path = db_path or MEMORY_DB_PATH
+        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+        self._try_load_vec_extension()
+
+    def _try_load_vec_extension(self):
+        """Try to load sqlite-vec extension for vector search."""
+        self.has_vec = False
+        try:
+            import sqlite_vec
+            self.conn.enable_load_extension(True)
+            sqlite_vec.load(self.conn)
+            self.conn.enable_load_extension(False)
+            self.has_vec = True
+            # Create virtual table for vector search if not exists
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+                    id TEXT PRIMARY KEY,
+                    embedding float[768]
+                )
+            """)
+            self.conn.commit()
+        except Exception:
+            # sqlite-vec not available, fall back to FTS-only search
+            pass
+
+    def _init_schema(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                mode TEXT NOT NULL,
+                user_plan TEXT NOT NULL,
+                summary TEXT,
+                quality_score REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS chunks (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                source TEXT NOT NULL DEFAULT 'session',
+                content TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'text',
+                created_at TEXT NOT NULL,
+                embedding BLOB,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS learned_patterns (
+                id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                source_session_id TEXT,
+                confidence REAL DEFAULT 0.5,
+                times_applied INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                embedding BLOB
+            );
+        """)
+        # Create FTS5 table if not exists
+        try:
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                    content, id UNINDEXED, source UNINDEXED, content_type UNINDEXED
+                )
+            """)
+        except sqlite3.OperationalError:
+            pass  # Already exists
+        self.conn.commit()
+
+    def create_session(self, mode: str, user_plan: str) -> str:
+        session_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO sessions (id, started_at, mode, user_plan) VALUES (?, ?, ?, ?)",
+            (session_id, datetime.now().isoformat(), mode, user_plan),
+        )
+        self.conn.commit()
+        return session_id
+
+    def end_session(self, session_id: str, summary: str | None = None, quality_score: float | None = None):
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?, summary = ?, quality_score = ? WHERE id = ?",
+            (datetime.now().isoformat(), summary, quality_score, session_id),
+        )
+        self.conn.commit()
+
+    def store_chunk(self, content: str, embedding: list[float] | None = None,
+                    session_id: str | None = None, source: str = "session",
+                    content_type: str = "text") -> str:
+        chunk_id = str(uuid.uuid4())
+        emb_bytes = _serialize_embedding(embedding) if embedding else None
+        self.conn.execute(
+            "INSERT INTO chunks (id, session_id, source, content, content_type, created_at, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chunk_id, session_id, source, content, content_type, datetime.now().isoformat(), emb_bytes),
+        )
+        # Insert into FTS index
+        try:
+            self.conn.execute(
+                "INSERT INTO chunks_fts (content, id, source, content_type) VALUES (?, ?, ?, ?)",
+                (content, chunk_id, source, content_type),
+            )
+        except Exception:
+            pass
+        # Insert into vector index
+        if embedding and self.has_vec:
+            try:
+                self.conn.execute(
+                    "INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)",
+                    (chunk_id, _serialize_embedding(embedding)),
+                )
+            except Exception:
+                pass
+        self.conn.commit()
+        return chunk_id
+
+    def store_pattern(self, pattern: LearnedPattern, embedding: list[float] | None = None):
+        emb_bytes = _serialize_embedding(embedding) if embedding else None
+        self.conn.execute(
+            "INSERT OR REPLACE INTO learned_patterns "
+            "(id, category, description, source_session_id, confidence, times_applied, created_at, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pattern.id, pattern.category, pattern.description,
+             pattern.source_session_id, pattern.confidence,
+             pattern.times_applied, pattern.created_at, emb_bytes),
+        )
+        self.conn.commit()
+
+    def keyword_search(self, query: str, top_k: int = 10) -> list[tuple[str, str, float]]:
+        """BM25 keyword search via FTS5. Returns (id, content, rank)."""
+        try:
+            rows = self.conn.execute(
+                "SELECT id, content, rank FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (query, top_k),
+            ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rows]
+        except Exception:
+            return []
+
+    def vector_search(self, embedding: list[float], top_k: int = 10) -> list[tuple[str, float]]:
+        """Vector similarity search. Returns (chunk_id, distance)."""
+        if not self.has_vec:
+            return []
+        try:
+            emb_bytes = _serialize_embedding(embedding)
+            rows = self.conn.execute(
+                "SELECT id, distance FROM chunks_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                (emb_bytes, top_k),
+            ).fetchall()
+            return [(r[0], r[1]) for r in rows]
+        except Exception:
+            return []
+
+    def get_chunk_by_id(self, chunk_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id, session_id, source, content, content_type, created_at FROM chunks WHERE id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+    def get_session_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return row[0] if row else 0
+
+    def get_pattern_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM learned_patterns").fetchone()
+        return row[0] if row else 0
+
+    def get_chunk_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        return row[0] if row else 0
+
+    def boost_pattern_confidence(self, pattern_id: str, delta: float = 0.1):
+        self.conn.execute(
+            "UPDATE learned_patterns SET confidence = MIN(1.0, confidence + ?), times_applied = times_applied + 1 WHERE id = ?",
+            (delta, pattern_id),
+        )
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
