@@ -1,4 +1,4 @@
-"""LLM provider registry — switch between Ollama, HuggingFace, etc."""
+"""LLM provider registry — switch between Ollama, HuggingFace, OpenAI, Anthropic, etc."""
 from fastapi import WebSocket
 
 from agent_team.llm.base import LLMProvider, SessionTokenTracker
@@ -9,18 +9,41 @@ _active_provider: str = "ollama"
 
 
 def _ensure_providers():
-    """Initialize providers on first access."""
+    """Initialize all providers on first access."""
     if _providers:
         return
+
+    # Load API keys from .env
+    from agent_team.llm.keys import load_keys_into_env
+    load_keys_into_env()
+
+    # Local providers
     from agent_team.llm.ollama_provider import OllamaProvider
     from agent_team.llm.huggingface_provider import HuggingFaceProvider
     _providers["ollama"] = OllamaProvider()
     _providers["huggingface"] = HuggingFaceProvider()
 
+    # Frontier providers
+    from agent_team.llm.providers import (
+        OpenAIProvider, AnthropicProvider, GoogleProvider,
+        MistralProvider, GroqProvider, DeepSeekProvider,
+        CohereProvider, TogetherProvider,
+    )
+    _providers["openai"] = OpenAIProvider()
+    _providers["anthropic"] = AnthropicProvider()
+    _providers["google"] = GoogleProvider()
+    _providers["mistral"] = MistralProvider()
+    _providers["groq"] = GroqProvider()
+    _providers["deepseek"] = DeepSeekProvider()
+    _providers["cohere"] = CohereProvider()
+    _providers["together"] = TogetherProvider()
+
 
 def get_provider(name: str | None = None) -> LLMProvider:
     """Get a provider by name, or the active provider."""
     _ensure_providers()
+    if (name or _active_provider) not in _providers:
+        raise ValueError(f"Unknown provider '{name or _active_provider}'. Available: {list(_providers.keys())}")
     return _providers[name or _active_provider]
 
 

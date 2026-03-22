@@ -2,11 +2,26 @@
 
 ---
 
-## v2.3.0 — HuggingFace LLM Provider Support (2026-03-22)
+## v2.3.0 — All Frontier LLM Providers + API Key Management (2026-03-22)
 
 ### Summary
 
-Added a pluggable LLM provider architecture. The system now supports both **Ollama** (local) and **HuggingFace** (Inference API or local TGI server) as LLM backends, switchable at runtime via CLI (`/llm`) or API.
+Added 10 LLM providers (2 local + 8 frontier) with a unified provider abstraction, runtime switching, and secure API key management. Keys are stored locally in `.env`, masked on display, and never logged.
+
+### Supported Providers
+
+| Provider | Default Model | Type |
+|---|---|---|
+| **Ollama** | `qwen2.5-coder:7b` | Local |
+| **HuggingFace** | `mistralai/Mistral-7B-Instruct-v0.3` | Local / Cloud |
+| **OpenAI** | `gpt-4o` | Cloud |
+| **Anthropic** | `claude-sonnet-4-20250514` | Cloud |
+| **Google** | `gemini-2.5-flash` | Cloud |
+| **Mistral** | `mistral-large-latest` | Cloud |
+| **Groq** | `llama-3.3-70b-versatile` | Cloud |
+| **DeepSeek** | `deepseek-chat` | Cloud |
+| **Cohere** | `command-r-plus` | Cloud |
+| **Together** | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` | Cloud |
 
 ### New Files
 
@@ -14,9 +29,12 @@ Added a pluggable LLM provider architecture. The system now supports both **Olla
 |---|---|
 | `src/agent_team/llm/__init__.py` | LLM package exports |
 | `src/agent_team/llm/base.py` | Abstract `LLMProvider` interface + `TokenStats`/`SessionTokenTracker` |
+| `src/agent_team/llm/openai_compat.py` | OpenAI-compatible SSE streaming base class |
+| `src/agent_team/llm/providers.py` | All 8 frontier providers (OpenAI, Anthropic, Google, Mistral, Groq, DeepSeek, Cohere, Together) |
 | `src/agent_team/llm/ollama_provider.py` | Ollama provider (refactored from `ollama/client.py`) |
 | `src/agent_team/llm/huggingface_provider.py` | HuggingFace provider (Inference API + local TGI) |
-| `src/agent_team/llm/registry.py` | Provider registry — switching, convenience functions |
+| `src/agent_team/llm/keys.py` | API key management — load/save/mask keys, `.env` storage |
+| `src/agent_team/llm/registry.py` | Provider registry — lazy init, switching, convenience functions |
 
 ### Modified Files
 
@@ -25,40 +43,29 @@ Added a pluggable LLM provider architecture. The system now supports both **Olla
 | `src/agent_team/agents/runner.py` | `stream_ollama` → `stream_llm` (provider-agnostic) |
 | `src/agent_team/agents/http_runner.py` | `call_ollama` → `call_llm` |
 | `src/agent_team/learning/extractor.py` | `call_ollama` → `call_llm` |
-| `src/agent_team/server/app.py` | New endpoints: `GET /providers`, `POST /providers/switch`. Health/models endpoints now provider-aware |
-| `src/agent_team/cli/interactive.py` | Added `/llm` slash command for provider switching, version bump to 2.3.0 |
+| `src/agent_team/server/app.py` | New endpoints: `GET /providers`, `POST /providers/switch`. Health/models now provider-aware |
+| `src/agent_team/cli/interactive.py` | Added `/llm`, `/key` slash commands, version bump to 2.3.0 |
 
-### HuggingFace Setup
+### API Key Management
 
-```bash
-# Set your HF token
-export HF_TOKEN="hf_..."
-
-# Optional: use a local TGI server instead of HF API
-export HF_API_URL="http://localhost:8080"
-
-# Optional: set default HF model
-export HF_MODEL="Qwen/Qwen2.5-Coder-7B-Instruct"
+```
+/key                      # Show all provider key status (masked)
+/key set openai sk-...    # Store a key (saved to .env, masked on screen)
+/key remove openai        # Remove a key
+/key urls                 # Show signup URLs for all providers
 ```
 
-### Supported HF Models
-
-- `mistralai/Mistral-7B-Instruct-v0.3` (default)
-- `meta-llama/Meta-Llama-3.1-8B-Instruct`
-- `Qwen/Qwen2.5-Coder-7B-Instruct`
-- `microsoft/Phi-3.5-mini-instruct`
-- `google/gemma-2-9b-it`
-- `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`
-- `bigcode/starcoder2-15b`
-- `codellama/CodeLlama-13b-Instruct-hf`
+Keys are stored in the repo-root `.env` file (gitignored) and loaded into `os.environ` at startup. On display, keys are masked: `sk-a**********9xyz`.
 
 ### CLI Usage
 
 ```
-/llm                    # List providers and their status
-/llm huggingface        # Switch to HuggingFace
+/llm                    # List all 10 providers and their status
+/llm anthropic          # Switch to Anthropic
 /llm ollama             # Switch back to Ollama
 /model <model_name>     # Switch model within active provider
+/key                    # Show API key status
+/key set <provider> <key>  # Store API key
 ```
 
 ---

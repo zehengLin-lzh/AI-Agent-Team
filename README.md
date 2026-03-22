@@ -50,8 +50,16 @@ AI Agent Team/
 │   │   ├── runner.py                 #     Pipeline orchestrator (WebSocket)
 │   │   ├── http_runner.py            #     Pipeline orchestrator (HTTP)
 │   │   └── context.py                #     Context builder for agents
-│   ├── ollama/                       #   LLM client
-│   │   └── client.py                 #     Streaming + token tracking
+│   ├── llm/                          #   LLM provider abstraction
+│   │   ├── base.py                   #     Abstract provider interface
+│   │   ├── registry.py               #     Provider registry & switching
+│   │   ├── keys.py                   #     API key management (.env storage)
+│   │   ├── openai_compat.py          #     OpenAI-compatible base class
+│   │   ├── providers.py              #     8 frontier providers
+│   │   ├── ollama_provider.py        #     Ollama provider
+│   │   └── huggingface_provider.py   #     HuggingFace provider
+│   ├── ollama/                       #   Legacy Ollama client
+│   │   └── client.py                 #     Direct Ollama streaming
 │   ├── memory/                       #   Memory system
 │   │   ├── database.py               #     SQLite + vector storage
 │   │   ├── embeddings.py             #     Embedding generation
@@ -94,11 +102,12 @@ AI Agent Team/
 
 ## Prerequisites
 
-| Dependency | Install |
-|---|---|
-| **uv** (Python package manager) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| **Ollama** (local LLM runtime) | `brew install ollama` (macOS) or [ollama.com](https://ollama.com/download) |
-| **A model** | `ollama pull qwen2.5-coder:7b` |
+| Dependency | Install | Required? |
+|---|---|---|
+| **uv** (Python package manager) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | Yes |
+| **Ollama** (local LLM runtime) | `brew install ollama` (macOS) or [ollama.com](https://ollama.com/download) | Yes (for local mode) |
+| **A model** | `ollama pull qwen2.5-coder:7b` | Yes (for local mode) |
+| **API key** (for cloud providers) | Use `/key set <provider> <key>` in CLI | Optional |
 
 ---
 
@@ -150,7 +159,8 @@ Starts:
 | Command | Description |
 |---|---|
 | `/help` | Show all commands |
-| `/llm [provider]` | Switch LLM provider (ollama / huggingface) or list providers |
+| `/llm [provider]` | Switch LLM provider or list all 10 providers |
+| `/key [set\|remove\|urls]` | Manage API keys (masked display, `.env` storage) |
 | `/model [name]` | Switch model or list available models |
 | `/mode <mode>` | Switch mode (thinking/coding/brainstorming/architecture/execution) |
 | `/status` | Connection and model info |
@@ -188,60 +198,81 @@ Starts:
 
 ## LLM Providers
 
-The system supports multiple LLM backends, switchable at runtime:
+The system supports **10 LLM providers** (2 local + 8 frontier), all switchable at runtime via `/llm` and `/key` commands.
+
+### Supported Providers
+
+| Provider | Default Model | API Key Required |
+|---|---|---|
+| **Ollama** (default) | `qwen2.5-coder:7b` | No (local) |
+| **HuggingFace** | `mistralai/Mistral-7B-Instruct-v0.3` | `HF_TOKEN` |
+| **OpenAI** | `gpt-4o` | `OPENAI_API_KEY` |
+| **Anthropic** | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| **Google** | `gemini-2.5-flash` | `GOOGLE_API_KEY` |
+| **Mistral** | `mistral-large-latest` | `MISTRAL_API_KEY` |
+| **Groq** | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| **DeepSeek** | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| **Cohere** | `command-r-plus` | `COHERE_API_KEY` |
+| **Together** | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` | `TOGETHER_API_KEY` |
+
+### API Key Management
+
+API keys are stored locally in a `.env` file (gitignored) and masked on display.
+
+```
+/key                        # Show all key status (masked)
+/key set openai sk-abc...   # Store a key
+/key remove openai          # Remove a key
+/key urls                   # Show signup URLs for all providers
+```
+
+You can also set keys via environment variables directly:
+```bash
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+### Switching Providers
+
+```
+/llm                    # List all providers
+/llm anthropic          # Switch to Anthropic
+/llm openai             # Switch to OpenAI
+/llm ollama             # Switch back to local Ollama
+/model gpt-4o-mini      # Switch model within active provider
+```
 
 ### Ollama (default — local, offline)
 
 ```bash
 ollama pull qwen2.5-coder:7b
 mat-agent-cli
-# In CLI:
-/llm ollama
-/model qwen2.5-coder:14b
 ```
 
 ### HuggingFace (cloud API or local TGI)
 
 ```bash
-# Set your HuggingFace token
-export HF_TOKEN="hf_..."
-
-# Start the backend, then in CLI:
+/key set huggingface hf_...
 /llm huggingface
-/model Qwen/Qwen2.5-Coder-7B-Instruct
 ```
 
-**Local TGI server** (for fully offline HF models):
+**Local TGI server** (fully offline):
 ```bash
-# Run a TGI server (Docker)
 docker run --gpus all -p 8080:80 \
   ghcr.io/huggingface/text-generation-inference:latest \
   --model-id Qwen/Qwen2.5-Coder-7B-Instruct
 
-# Point Agent Team at it
 export HF_API_URL="http://localhost:8080"
 ```
-
-**Environment variables:**
-| Variable | Description |
-|---|---|
-| `HF_TOKEN` | HuggingFace API token (required for cloud API) |
-| `HF_API_URL` | Custom endpoint (default: HF Inference API) |
-| `HF_MODEL` | Default HF model |
 
 ---
 
 ## Customization
 
-**Switch provider at runtime:**
+**Switch provider/model at runtime:**
 ```
-/llm huggingface
-/llm ollama
-```
-
-**Switch model at runtime:**
-```
-/model qwen2.5-coder:14b
+/llm anthropic
+/model claude-opus-4-20250514
 ```
 
 **Change default model** — edit `MODEL` in `src/agent_team/config.py`:
@@ -267,16 +298,17 @@ export AGENT_TEAM_PLAN_DIR="~/Documents/agent-plans"
 | `deepseek-r1:14b` | 10 GB | ★★★ | ★★★★★ |
 | `qwen2.5-coder:7b` | 5 GB | ★★★ | ★★★ |
 
-### HuggingFace
+### Frontier (cloud)
 
-| Model | Type | Notes |
-|---|---|---|
-| `Qwen/Qwen2.5-Coder-7B-Instruct` | Code | Strong coding, good reasoning |
-| `mistralai/Mistral-7B-Instruct-v0.3` | General | Balanced, fast |
-| `meta-llama/Meta-Llama-3.1-8B-Instruct` | General | Strong reasoning |
-| `microsoft/Phi-3.5-mini-instruct` | Compact | Small but capable |
-| `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | Code | Coding specialist |
-| `bigcode/starcoder2-15b` | Code | Large code model |
+| Provider | Top Models |
+|---|---|
+| OpenAI | `gpt-4o`, `gpt-4.1`, `o3-mini` |
+| Anthropic | `claude-sonnet-4-20250514`, `claude-opus-4-20250514` |
+| Google | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| Mistral | `mistral-large-latest`, `codestral-latest` |
+| Groq | `llama-3.3-70b-versatile` (fast inference) |
+| DeepSeek | `deepseek-chat`, `deepseek-reasoner` |
+| Together | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` |
 
 ---
 

@@ -1,4 +1,4 @@
-"""LLM provider abstraction — supports Ollama, HuggingFace, and more."""
+"""LLM provider abstraction — supports Ollama, HuggingFace, OpenAI, Anthropic, Google, and more."""
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
 from agent_team.llm.registry import (
     get_provider,

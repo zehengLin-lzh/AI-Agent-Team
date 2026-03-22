@@ -219,8 +219,10 @@ def render_help():
 
     commands = [
         ("/help", "Show this help menu"),
-        ("/llm [provider]", "Switch LLM provider (e.g., /llm huggingface) or list providers"),
-        ("/model [name]", "Switch the active model (e.g., /model llama3.2)"),
+        ("/llm [provider]", "Switch LLM provider (e.g., /llm openai) or list all providers"),
+        ("/key [provider] [key]", "Manage API keys — view status, set, or remove keys"),
+        ("/key urls", "Show where to get API keys for each provider"),
+        ("/model [name]", "Switch the active model (e.g., /model gpt-4o)"),
         ("/model list", "List all available models"),
         ("/mode <mode>", "Switch mode: thinking, coding, brainstorming, architecture, execution"),
         ("/status", "Show current connection status and model info"),
@@ -475,8 +477,7 @@ async def handle_llm_command(args: str):
         console.print(table)
         console.print()
         console.print("[dim]Usage: /llm <provider_name> to switch[/]")
-        console.print("[dim]  Providers: ollama (local), huggingface (API or local TGI)[/]")
-        console.print("[dim]  For HuggingFace: export HF_TOKEN='hf_...' before starting backend[/]")
+        console.print("[dim]  Use /key to manage API keys for cloud providers[/]")
         return
 
     # Switch provider
@@ -490,6 +491,101 @@ async def handle_llm_command(args: str):
     else:
         error = result.get("error", "Unknown error")
         console.print(f"[error]\u2716 {error}[/]")
+
+
+async def handle_key_command(args: str):
+    """Handle /key commands — view, set, or remove API keys."""
+    from agent_team.llm.keys import (
+        get_key_status, save_key, remove_key, mask_key,
+        PROVIDER_KEY_NAMES, PROVIDER_KEY_URLS,
+    )
+
+    parts = args.strip().split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+    subcmd_args = parts[1].strip() if len(parts) > 1 else ""
+
+    if not subcmd:
+        # Show all key statuses
+        statuses = get_key_status()
+        table = Table(
+            title="API Key Status",
+            border_style="cyan",
+            header_style="bold cyan",
+        )
+        table.add_column("Provider", style="bold")
+        table.add_column("Env Variable", style="dim")
+        table.add_column("Key", style="white")
+        table.add_column("Status", justify="center")
+
+        for provider, info in statuses.items():
+            if provider == "ollama":
+                continue  # Ollama doesn't need a key
+            status_icon = "[green]\u2714 Set[/]" if info["set"] else "[dim]\u2716 Not set[/]"
+            table.add_row(
+                provider,
+                info["env_var"],
+                info["masked"],
+                status_icon,
+            )
+
+        console.print()
+        console.print(table)
+        console.print()
+        console.print("[dim]Commands:[/]")
+        console.print("[dim]  /key <provider> <api-key>   Set a key (e.g., /key openai sk-...)[/]")
+        console.print("[dim]  /key remove <provider>      Remove a key[/]")
+        console.print("[dim]  /key urls                   Show where to get keys[/]")
+        return
+
+    if subcmd == "urls":
+        table = Table(title="Where to Get API Keys", border_style="green", header_style="bold green")
+        table.add_column("Provider", style="bold")
+        table.add_column("URL", style="cyan")
+        for provider, url in PROVIDER_KEY_URLS.items():
+            table.add_row(provider, url)
+        console.print()
+        console.print(table)
+        return
+
+    if subcmd == "remove":
+        provider = subcmd_args.lower()
+        if not provider:
+            console.print("[warning]Usage: /key remove <provider>[/]")
+            return
+        if provider not in PROVIDER_KEY_NAMES:
+            console.print(f"[error]Unknown provider: {provider}[/]")
+            return
+        removed = remove_key(provider)
+        if removed:
+            console.print(f"[success]\u2714 Removed key for {provider}[/]")
+        else:
+            console.print(f"[muted]No key found for {provider}[/]")
+        return
+
+    # Setting a key: /key <provider> <key-value>
+    provider = subcmd.lower()
+    key_value = subcmd_args
+
+    if provider not in PROVIDER_KEY_NAMES:
+        console.print(f"[error]Unknown provider: {provider}[/]")
+        console.print(f"[dim]Available: {', '.join(p for p in PROVIDER_KEY_NAMES if p != 'ollama')}[/]")
+        return
+
+    if not key_value:
+        # Prompt for key
+        url = PROVIDER_KEY_URLS.get(provider, "")
+        console.print(f"\n[bold]Set API key for {provider}[/]")
+        if url:
+            console.print(f"[dim]Get your key at: [cyan]{url}[/][/]")
+        console.print("[dim]Paste your key below (it will be stored locally in .env):[/]")
+        key_value = input("  API Key: ").strip()
+        if not key_value:
+            console.print("[muted]Cancelled.[/]")
+            return
+
+    save_key(provider, key_value)
+    console.print(f"[success]\u2714 Key saved for {provider}: {mask_key(key_value)}[/]")
+    console.print(f"[dim]  Stored in .env ({PROVIDER_KEY_NAMES[provider]})[/]")
 
 
 async def handle_model_command(args: str):
@@ -720,6 +816,9 @@ async def main():
 
                 elif cmd == "/llm":
                     await handle_llm_command(args)
+
+                elif cmd == "/key":
+                    await handle_key_command(args)
 
                 elif cmd == "/model":
                     await handle_model_command(args)
