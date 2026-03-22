@@ -2,6 +2,30 @@
 
 ---
 
+## v2.4.0 — Auto Backend + Mat Agent Team Rebrand (2026-03-22)
+
+### Summary
+
+The CLI now auto-starts the backend on launch and auto-stops it on exit — no more running `./start.sh` separately. Rebranded from "Agent Team" to "Mat Agent Team". Added a demo GIF to the README.
+
+### Changes
+
+| Change | Detail |
+|---|---|
+| Auto-start backend | `mat-agent-cli` starts the FastAPI backend automatically if not running |
+| Auto-stop backend | Backend subprocess is terminated on `/exit`, `Ctrl+C`, or `Ctrl+D` |
+| Rebrand | Title changed from "Agent Team" to "Mat Agent Team" with new ASCII banner |
+| Demo GIF | `demo/cli-demo.gif` — animated terminal recording embedded in README |
+
+### Modified Files
+
+| File | What changed |
+|---|---|
+| `src/agent_team/cli/interactive.py` | Added `start_backend()`/`stop_backend()` lifecycle, new banner, renamed to Mat Agent Team |
+| `README.md` | Rebranded title, added demo GIF, updated descriptions |
+
+---
+
 ## v2.3.0 — All Frontier LLM Providers + API Key Management (2026-03-22)
 
 ### Summary

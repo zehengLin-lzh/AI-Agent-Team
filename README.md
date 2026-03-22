@@ -1,6 +1,10 @@
-# Agent Team — Self-Learning Local AI Agent Team
+# Mat Agent Team — Self-Learning Local AI Agent Team
 
-A local-first AI agent team that thinks, plans, codes, and reviews — powered by Ollama. Supports 5 modes (thinking, coding, brainstorming, architecture, execution) with self-learning memory across sessions.
+A local-first AI agent team that thinks, plans, codes, and reviews — powered by Ollama. Supports 10 LLM providers, 5 modes, and self-learning memory across sessions.
+
+## Demo
+
+![CLI Demo](demo/cli-demo.gif)
 
 ---
 

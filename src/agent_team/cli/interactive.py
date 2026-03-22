@@ -14,6 +14,8 @@ Usage:
 import asyncio
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -39,7 +41,7 @@ from websockets.exceptions import ConnectionClosedError
 
 # ── Branding & Config ────────────────────────────────────────────────────────
 
-APP_NAME = "Agent Team"
+APP_NAME = "Mat Agent Team"
 APP_VERSION = "2.3.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
@@ -107,6 +109,101 @@ class CLIState:
 state = CLIState()
 
 
+# ── Backend Process Manager ──────────────────────────────────────────────────
+
+_backend_process: subprocess.Popen | None = None
+
+
+def _find_repo_root() -> Path:
+    """Find the repo root (contains pyproject.toml)."""
+    candidate = Path(__file__).resolve().parent.parent.parent.parent
+    if (candidate / "pyproject.toml").exists():
+        return candidate
+    p = Path.cwd()
+    while p != p.parent:
+        if (p / "pyproject.toml").exists():
+            return p
+        p = p.parent
+    return Path.cwd()
+
+
+async def _is_backend_running() -> bool:
+    """Check if the backend is already running."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{BACKEND_URL}/health")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def start_backend() -> bool:
+    """Start the backend server as a subprocess if not already running."""
+    global _backend_process
+
+    if await _is_backend_running():
+        return True
+
+    repo_root = _find_repo_root()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{repo_root / 'src'}:{env.get('PYTHONPATH', '')}"
+
+    console.print("[dim]Starting backend server...[/]", end=" ")
+
+    try:
+        _backend_process = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "agent_team.server.app:app",
+                "--port", "8000",
+                "--log-level", "warning",
+            ],
+            cwd=str(repo_root),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        # Wait for backend to be ready (up to 15 seconds)
+        for _ in range(30):
+            await asyncio.sleep(0.5)
+            if await _is_backend_running():
+                console.print("[success]\u2714 Backend started[/]")
+                return True
+            if _backend_process.poll() is not None:
+                stderr = _backend_process.stderr.read().decode() if _backend_process.stderr else ""
+                console.print("[error]\u2716 Backend failed to start[/]")
+                if stderr:
+                    console.print(f"[dim]{stderr[:300]}[/]")
+                _backend_process = None
+                return False
+
+        console.print("[error]\u2716 Backend start timed out[/]")
+        stop_backend()
+        return False
+
+    except Exception as e:
+        console.print(f"[error]\u2716 Failed to start backend: {e}[/]")
+        return False
+
+
+def stop_backend():
+    """Stop the backend subprocess if we started it."""
+    global _backend_process
+    if _backend_process is not None:
+        try:
+            _backend_process.terminate()
+            try:
+                _backend_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _backend_process.kill()
+                _backend_process.wait(timeout=3)
+        except Exception:
+            pass
+        finally:
+            _backend_process = None
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def ws_url() -> str:
@@ -164,14 +261,12 @@ async def switch_model_remote(model_name: str) -> dict:
 def render_banner():
     """Show startup banner."""
     banner_text = Text()
-    banner_text.append("  _____                    _     _____                    \n", style="bold cyan")
-    banner_text.append(" |  _  |                  | |   |_   _|                   \n", style="bold cyan")
-    banner_text.append(" | |_| | __ _  ___ _ __  | |_    | | ___  __ _ _ __ ___  \n", style="bold cyan")
-    banner_text.append(" |  _  |/ _` |/ _ \\ '_ \\ | __|   | |/ _ \\/ _` | '_ ` _ \\ \n", style="bold blue")
-    banner_text.append(" | | | | (_| |  __/ | | || |_    | |  __/ (_| | | | | | |\n", style="bold blue")
-    banner_text.append(" |_| |_|\\__, |\\___|_| |_| \\__|   |_|\\___|\\__,_|_| |_| |_|\n", style="bold magenta")
-    banner_text.append("         __/ |                                             \n", style="bold magenta")
-    banner_text.append("        |___/                                              \n", style="bold magenta")
+    banner_text.append("  __  __         _        _                    _     _____                    \n", style="bold cyan")
+    banner_text.append(" |  \\/  |  __ _ | |_     / \\    __ _  ___ _ __| |_  |_   _|___  __ _ _ __ ___ \n", style="bold cyan")
+    banner_text.append(" | |\\/| | / _` || __|   / _ \\  / _` |/ _ \\ '_ \\ __|   | | / _ \\/ _` | '_ ` _ \\\n", style="bold cyan")
+    banner_text.append(" | |  | || (_| || |_   / ___ \\| (_| |  __/ | | | |_    | ||  __/ (_| | | | | | |\n", style="bold blue")
+    banner_text.append(" |_|  |_| \\__,_| \\__| /_/   \\_\\\\__, |\\___|_| |_|\\__|   |_| \\___|\\__,_|_| |_| |_|\n", style="bold blue")
+    banner_text.append("                                |___/                                           \n", style="bold magenta")
 
     console.print(Panel(
         banner_text,
@@ -438,7 +533,7 @@ async def stream_conversation(
     except ConnectionClosedError as e:
         console.print(f"\n[error]Connection closed unexpectedly: {e}[/]")
     except ConnectionRefusedError:
-        console.print("[error]Cannot connect to backend. Is it running? Try: ./start.sh[/]")
+        console.print("[error]Cannot connect to backend. Try /status to reconnect.[/]")
 
     return token_summary
 
@@ -762,15 +857,21 @@ async def main():
     console.clear()
     render_banner()
 
-    # Check backend
-    console.print("[dim]Connecting to backend...[/]", end=" ")
+    # Auto-start backend if not running
+    backend_was_started = False
+    already_running = await _is_backend_running()
+    if already_running:
+        console.print(f"[success]\u2714 Backend already running[/] [dim]({BACKEND_URL})[/]")
+    else:
+        backend_was_started = await start_backend()
+
+    # Check backend and populate state
     connected = await check_backend()
     if connected:
-        console.print(f"[success]\u2714 Connected[/] [dim]({BACKEND_URL})[/]")
-        console.print(f"[dim]  Model: {state.model} | Models available: {len(state.available_models)}[/]")
+        console.print(f"[dim]  LLM: {state.llm_provider} | Model: {state.model} | Models available: {len(state.available_models)}[/]")
     else:
         console.print(f"[error]\u2716 Cannot reach backend at {BACKEND_URL}[/]")
-        console.print("[warning]Start the backend first: ./start.sh[/]")
+        console.print("[warning]Check that dependencies are installed: uv sync[/]")
         console.print("[dim]Some features may be unavailable.[/]")
 
     console.print()
@@ -808,6 +909,9 @@ async def main():
                 args = parts[1] if len(parts) > 1 else ""
 
                 if cmd in ("/exit", "/quit", "/q"):
+                    if backend_was_started:
+                        console.print("[dim]Stopping backend...[/]")
+                        stop_backend()
                     console.print("\n[dim]Goodbye! \U0001f44b[/]\n")
                     break
 
@@ -848,7 +952,7 @@ async def main():
                         console.print("[warning]Usage: /plan <your task description>[/]")
                         continue
                     if not state.backend_connected:
-                        console.print("[error]Backend not connected. Run ./start.sh first.[/]")
+                        console.print("[error]Backend not connected. Try /status to reconnect.[/]")
                         continue
                     detected = auto_detect_mode(args)
                     console.print(f"[dim]Auto-detected mode: {MODE_ICONS.get(detected, '')} {detected}[/]")
@@ -865,7 +969,7 @@ async def main():
                         console.print("[warning]Usage: /exec <your task description>[/]")
                         continue
                     if not state.backend_connected:
-                        console.print("[error]Backend not connected. Run ./start.sh first.[/]")
+                        console.print("[error]Backend not connected. Try /status to reconnect.[/]")
                         continue
                     detected = auto_detect_mode(args)
                     if detected not in ("coding", "execution"):
@@ -885,7 +989,7 @@ async def main():
             if not state.backend_connected:
                 connected = await check_backend()
                 if not connected:
-                    console.print("[error]Backend not connected. Run ./start.sh first.[/]")
+                    console.print("[error]Backend not connected. Try /status to reconnect.[/]")
                     continue
 
             # Auto-detect mode
@@ -916,6 +1020,9 @@ async def main():
             console.print("\n[dim]Use /exit to quit[/]")
             continue
         except EOFError:
+            if backend_was_started:
+                console.print("[dim]Stopping backend...[/]")
+                stop_backend()
             console.print("\n[dim]Goodbye! \U0001f44b[/]\n")
             break
         except Exception as e:
@@ -929,6 +1036,8 @@ def main_sync():
         asyncio.run(main())
     except KeyboardInterrupt:
         console.print("\n[dim]Goodbye![/]\n")
+    finally:
+        stop_backend()
 
 
 if __name__ == "__main__":
