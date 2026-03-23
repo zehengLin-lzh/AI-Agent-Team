@@ -12,7 +12,7 @@ EMBEDDING_MODEL = "nomic-embed-text"
 # ── Three-tier model routing ────────────────────────────────────────────────
 FAST_MODEL = MODEL                  # Chat/ask/orchestrator — lightweight conversation
 REASONING_MODEL = THINKING_MODEL    # Thinker/planner/reviewer — logical analysis
-CODING_MODEL = MODEL                # Executor — code generation (set to e.g. qwen2.5-coder:14b for stronger output)
+CODING_MODEL = THINKING_MODEL        # Executor — use reasoning model for stronger code output
 
 MODEL_ROUTING: dict[str, str | None] = {
     "ORCHESTRATOR": FAST_MODEL,

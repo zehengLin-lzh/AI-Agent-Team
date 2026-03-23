@@ -512,17 +512,56 @@ EXECUTOR_PROMPTS: dict[AgentMode, str] = {
     AgentMode.CODING: _EXECUTOR_BASE.format(
         mode_instructions="""Implement exactly what PLANNER specified. Rules:
 - Write ONE complete file at a time
-- NO stubs, NO placeholders, NO TODOs
+- NO stubs, NO placeholders, NO TODOs, NO simulated/mock implementations
+- Actually implement ALL functionality — connect to real services, write real logic
 - Handle loading states AND error states
 - Validate all inputs
-- Use correct HTTP status codes""",
-        output_format="""File delimiter (use exactly):
+- Use correct HTTP status codes
+- Include ALL necessary imports at the top of each file
+- Create ALL files needed: source code, config, requirements, README
+
+BEFORE writing ANY code, output an IMPORT MAP that lists every cross-file dependency:
+```
+IMPORT MAP:
+  main.py imports: database.get_db, database.engine, database.Base, models.ChatSession, providers.LLMProvider, providers.OllamaProvider
+  models.py imports: sqlalchemy (Column, String, etc.), database.Base
+  database.py imports: sqlalchemy
+  providers.py imports: ollama_client.get_ollama_response
+  ollama_client.py imports: httpx
+```
+Then verify: for EACH import listed, does the target file ACTUALLY DEFINE that name? If not, fix the import map first.
+
+SELF-CHECK rules for EVERY file:
+1. IMPORTS: Every `from X import Y` must have Y actually defined in X. If providers.py calls get_ollama_response, it MUST have `from ollama_client import get_ollama_response`.
+2. PORTS & URLS: Use correct ports (Ollama: 11434). Use /api/chat endpoint (not /api/generate) for chat with Ollama.
+3. NAMING: If you define a class as `ChatSessionDB` in database.py, import it as `ChatSessionDB` everywhere — NOT as `ChatSession`.
+4. DB SESSION: Use dependency injection with yield pattern for FastAPI.
+5. MISSING IMPORTS: If you use `List`, `Optional`, `httpx`, etc., import them at the top of the file.""",
+        output_format="""CRITICAL: Use this EXACT file format — NO markdown code blocks (no ```), NO language tags, just raw code:
 --- FILE: path/to/file ---
-<complete file content>
+raw code here, NO backticks
 --- END FILE ---
 
 After each file:
-Next: <what file comes next, or "all files complete">""",
+Next: <what file comes next, or "all files complete">
+
+EXAMPLE of correct format:
+--- FILE: app/main.py ---
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
+--- END FILE ---
+
+WRONG format (DO NOT do this):
+--- FILE: app/main.py ---
+```python
+from fastapi import FastAPI
+```
+--- END FILE ---""",
     ),
     AgentMode.ARCHITECTURE: _EXECUTOR_BASE.format(
         mode_instructions="""Produce detailed architecture documentation:
@@ -542,19 +581,38 @@ Next: <what file comes next, or "all files complete">""",
     ),
     AgentMode.EXECUTION: _EXECUTOR_BASE.format(
         mode_instructions="""Implement the code AND specify run commands. Rules:
-- Write complete, runnable files
+- Write complete, runnable files — NO stubs, NO mocks, NO simulated responses
+- Actually implement ALL functionality — connect to real services, write real logic
+- Include ALL necessary imports at the top of each file
+- Create ALL files needed: source code, config, requirements, README
 - Include run commands for execution
 - Handle errors gracefully
-- Include cleanup if needed""",
-        output_format="""File delimiter:
+- Include cleanup if needed
+
+BEFORE writing ANY code, output an IMPORT MAP listing every cross-file dependency, then verify each import target exists.
+
+SELF-CHECK rules for EVERY file:
+1. IMPORTS: Every `from X import Y` must have Y actually defined in X.
+2. PORTS & URLS: Use correct ports (Ollama: 11434). Use /api/chat endpoint for Ollama chat.
+3. NAMING: Use consistent class/function names across all files.
+4. DB SESSION: Use dependency injection with yield pattern.
+5. MISSING IMPORTS: If you use `List`, `Optional`, `httpx`, etc., import them at the top.""",
+        output_format="""CRITICAL: Use this EXACT file format — NO markdown code blocks (no ```), NO language tags, just raw code:
 --- FILE: path/to/file ---
-<complete file content>
+raw code here, NO backticks
 --- END FILE ---
 
 Run command delimiter:
 --- RUN: <description> ---
 <command to execute>
---- END RUN ---""",
+--- END RUN ---
+
+EXAMPLE of correct format:
+--- FILE: app/main.py ---
+from fastapi import FastAPI
+
+app = FastAPI()
+--- END FILE ---""",
     ),
 }
 
@@ -584,12 +642,23 @@ Strength of argument: STRONG / MODERATE / WEAK""",
 - Plan compliance (does it match what was requested?)
 Also write test cases for critical paths.
 
+CRITICAL: MENTAL COMPILATION CHECK — go through EVERY file and verify:
+1. Every `import X from Y` actually exists in file Y. If providers/__init__.py defines LLMProvider but router imports get_provider from it, that's a MISSING FUNCTION.
+2. All service URLs use correct ports (Ollama default: 11434, NOT 11443).
+3. Cross-file imports use correct module paths (if database.py is in app/, import must be `from app.database import Base`, not `from database import Base`).
+4. Database sessions are properly closed (no leaked connections).
+5. All functions called in route handlers are actually defined and importable.
+
+If ANY of these checks fail, you MUST output:
+FIX_REQUIRED:
+- <specific fix needed with file name and what to change>
+
 IMPORTANT RULES:
 - Only reference line numbers you can actually see in the scan context — do NOT fabricate line numbers
 - Check that ALL requirements from the original task have a concrete solution (not just "will be done later")
-- Verify that code snippets are mathematically/logically correct (e.g., z-scores average to 0, not a useful combined score)
-- Check that the plan includes quantified improvement estimates
-- If file paths are placeholders like <exact file path>, mark as NOT MET""",
+- Verify that code snippets are mathematically/logically correct
+- If file paths are placeholders like <exact file path>, mark as NOT MET
+- Use FIX_REQUIRED: marker when fixes are needed — this triggers automatic re-execution""",
         review_format="""Plan compliance:
   <requirement met>
   <requirement partially met> -- missing: <what>
@@ -646,7 +715,20 @@ Recommendations:
 - Are the outputs correct?
 - Were there any errors or warnings?
 - Is the code safe to run?
-- Does it match what was requested?""",
+- Does it match what was requested?
+
+CRITICAL: MENTAL COMPILATION CHECK — go through EVERY file and verify:
+1. Every `import X from Y` actually exists in file Y. Missing functions = broken code.
+2. All service URLs use correct ports (Ollama default: 11434, NOT 11443).
+3. Cross-file imports use correct module paths.
+4. Database sessions are properly closed.
+5. All functions called in route handlers are actually defined and importable.
+
+If ANY of these checks fail, you MUST output:
+FIX_REQUIRED:
+- <specific fix needed with file name and what to change>
+
+The FIX_REQUIRED: marker triggers automatic re-execution — always use it when fixes are needed.""",
         review_format="""Code review:
   <file>: CLEAN / ISSUES -- <detail>
 

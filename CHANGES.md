@@ -2,11 +2,11 @@
 
 ---
 
-## v4.0.0 — Pipeline Fixes, Model Routing & Security (2026-03-23)
+## v4.0.0 — Pipeline Fixes, Model Routing, Security & Accuracy (2026-03-23)
 
 ### Summary
 
-Major reliability and UX overhaul based on real-world testing on a second machine. Fixes 5 critical pipeline issues, adds three-tier model routing, scan security, and execution traceability.
+Major reliability and UX overhaul based on real-world testing on a second machine. Fixes 5 critical pipeline issues, adds three-tier model routing, scan security, execution traceability, and improved code generation prompts.
 
 ### Pipeline Fixes
 - **A1: Fix plan_only mode** — Previously sent invalid `"plan_only"` as AgentMode, causing EXECUTOR to run during planning. Now sends real mode + separate `plan_only` boolean; EXECUTOR properly skipped in plan-only.
@@ -22,11 +22,34 @@ Major reliability and UX overhaul based on real-world testing on a second machin
 - **A2: Execution traceability** — After EXECUTOR writes files, CLI displays a panel listing all absolute file paths written. Users can find output on any machine.
 - **A4: Scan security** — `/scan` now filters sensitive files (.env, credentials, .pem, service accounts) and redacts secrets (API keys, passwords, tokens) from RAG content before sending to LLM.
 
+### Code Generation & Accuracy
+- **EXECUTOR prompt**: Added IMPORT MAP requirement — executor must list all cross-file dependencies before writing code, then verify each import target exists. Added self-check for correct ports (Ollama: 11434), consistent naming, and DB session cleanup.
+- **REVIEWER prompt**: Added "mental compilation" check — reviewer must trace every import across files, verify URLs/ports, check all referenced functions exist. Must use `FIX_REQUIRED:` marker to trigger automatic re-execution.
+- **HTTP runner rewrite**: Added debate after THINKER, model routing, and fix loops after REVIEWER (matching WebSocket runner capabilities).
+- **File writer fix**: Fixed path doubling on macOS (`/tmp` → `/private/tmp` symlink) and absolute path handling.
+- **CODING_MODEL**: Changed from 7b to 14b (qwen3:14b) for stronger code generation.
+
+### Accuracy Test Results (Haiku vs Mat Agent Team)
+
+Task: Build a FastAPI app connecting to Ollama for chat with SQLite, provider abstraction, session history.
+
+| Round | Optimizations | Mat Score | Haiku | Gap |
+|-------|-------------|-----------|-------|-----|
+| R1 | Baseline | 21 | 99 | 78 |
+| R2 | Stronger prompts, 14b model | 23 | 87 | 64 |
+| R3 | Fix loop, debate, import checks | 51 | 87 | 36 |
+| R4 | Import map, mental compilation | 47 | 87 | 40 |
+
+Key finding: Architecture quality improved significantly (provider abstraction, router separation, error handling). Cross-file import consistency remains the bottleneck — a 14b local model cannot reliably maintain import/naming consistency across 6+ files. This is a model capability limitation, not a prompt engineering problem.
+
 ### Files Modified
 - `src/agent_team/config.py` — Added `MODEL_ROUTING`, `FAST_MODEL`, `REASONING_MODEL`, `CODING_MODEL`, `SENSITIVE_FILE_PATTERNS`, `SENSITIVE_EXTENSIONS`, `SENSITIVE_CONTENT_RE`
 - `src/agent_team/agents/runner.py` — Refactored model swapping to use `MODEL_ROUTING`, added `plan_only`/`reuse_plan`/`prior_phase_outputs` params, `files_written` WebSocket message
-- `src/agent_team/server/app.py` — Passes `plan_only`, `reuse_plan`, `phase_outputs` from WebSocket to `AgentTeam`
+- `src/agent_team/agents/http_runner.py` — Complete rewrite with debate, model routing, and fix loops
+- `src/agent_team/agents/definitions.py` — EXECUTOR import map requirement, REVIEWER mental compilation, stronger self-check rules
+- `src/agent_team/server/app.py` — Passes `plan_only`, `reuse_plan`, `phase_outputs` from WebSocket to `AgentTeam`; error handling for /ask endpoint
 - `src/agent_team/cli/interactive.py` — `stream_conversation()` returns phase outputs, path auto-detection, scan security, model routing for chat/ask, `files_written` display
+- `src/agent_team/files/writer.py` — Fixed path doubling with macOS symlinks and absolute path handling
 
 ---
 

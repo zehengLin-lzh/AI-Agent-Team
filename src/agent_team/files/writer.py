@@ -6,7 +6,7 @@ from agent_team.config import REPO_ROOT
 def _resolve_base_dir(execution_path: str | None) -> Path:
     if execution_path:
         p = Path(execution_path).expanduser().resolve()
-        return p.parent
+        return p if p.is_dir() else p.parent
     return REPO_ROOT
 
 def extract_and_write_files(
@@ -21,9 +21,18 @@ def extract_and_write_files(
         re.DOTALL,
     )
     for match in pattern.finditer(executor_output):
-        rel_path = match.group(1).strip().lstrip("/")
+        raw_path = match.group(1).strip()
         content = match.group(2)
-        target = base_dir / rel_path
+        # If path is absolute, resolve symlinks and check if under base_dir
+        if raw_path.startswith("/"):
+            abs_path = Path(raw_path).resolve()
+            try:
+                abs_path.relative_to(base_dir)
+                target = abs_path
+            except ValueError:
+                target = base_dir / raw_path.lstrip("/")
+        else:
+            target = base_dir / raw_path
         if skip_existing and target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)

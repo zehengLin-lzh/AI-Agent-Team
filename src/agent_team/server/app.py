@@ -70,6 +70,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest):
+    import traceback as _tb
     user_plan = request.plan.strip()
     if not user_plan:
         raise ValueError("plan must not be empty")
@@ -92,10 +93,15 @@ async def ask(request: AskRequest):
     else:
         user_plan_with_context = f"{user_plan}\n\nExecution context:\n- Mode: {mode.value}"
 
-    phase_outputs = await run_team_http(
-        user_plan_with_context, mode,
-        agent_mode=agent_mode, execution_path=execution_path,
-    )
+    try:
+        phase_outputs = await run_team_http(
+            user_plan_with_context, mode,
+            agent_mode=agent_mode, execution_path=execution_path,
+        )
+    except Exception as e:
+        print(f"[/ask] Pipeline error: {e}")
+        _tb.print_exc()
+        phase_outputs = {"ERROR": str(e)}
 
     planner_output = phase_outputs.get("PLANNER", "") or user_plan
     first_line = next((ln.strip() for ln in planner_output.splitlines() if ln.strip()), "")
