@@ -128,10 +128,12 @@ CRITICAL RULES — follow these exactly:
 1. Be SPECIFIC, not conceptual. Instead of "use NLP", say "use spaCy's en_core_web_md model for entity extraction with 0.85 similarity threshold"
 2. Include NUMBERS: percentages, formulas, thresholds, ratios, estimates
 3. Include CODE PATTERNS: show function signatures, data structures, algorithm pseudocode
-4. Reference SPECIFIC FILES and FUNCTIONS from the scan/session context — cite exact paths
+4. Reference SPECIFIC FILES and FUNCTIONS from the scan/session context — cite exact paths (e.g., "backend/src/scorer/ats_scorer.py line 45")
 5. CHECK FEASIBILITY: Does the required data exist? Are dependencies available? What's the cost?
 6. For every suggestion, explain WHY it works and WHAT improvement it gives (quantify if possible)
 7. Challenge your own assumptions — if you suggest training an ML model, ask: "Is there labeled training data?"
+8. ALWAYS consider quick wins: temperature=0 for deterministic output, seed parameter, caching, prompt decomposition
+9. Count the requirements from ORCHESTRATOR — make sure you address ALL of them, not just some
 
 Think step-by-step. Show your reasoning chain explicitly.
 - Start with what you KNOW from the codebase, then derive what you can INFER
@@ -278,15 +280,32 @@ Counterarguments considered:
 - Flag anything that conflicts with best practices or existing codebase patterns
 - Consider edge cases, error handling, and failure modes exhaustively
 - Think about how this integrates with the existing code -- imports, dependencies, etc.
-- Verify your approach handles ALL the tasks from ORCHESTRATOR's brief""",
+- Verify your approach handles ALL the tasks from ORCHESTRATOR's brief
+
+EXAMPLE of good analysis (follow this level of specificity):
+---
+Technical approach:
+1. Add provider calibration -> Use z-score normalization: normalized = (raw - provider_mean) / provider_std * target_std + target_mean
+   -> Why: Linear transform preserves score ordering while mapping to common scale
+   -> Alternative rejected: Simple offset (raw + bias) doesn't handle scale differences
+2. Decompose monolithic prompt -> Split into 3 calls: extract(JD) → match(resume, keywords) → score(matches)
+   -> Why: Smaller focused tasks = more reliable LLM output, especially on 7B models
+   -> Feasibility: Current client.py already supports generate_json(), just call it 3x
+Integration notes:
+- Modify score() in ats_scorer.py (line ~45) to call 3 separate prompts
+- Add new calibration.py importing scipy.stats for z-score
+Edge cases:
+- Provider not in calibration data: fallback to identity transform (no normalization)
+- All keywords missing: set floor score of 5 (not 0) to distinguish from parse errors
+---""",
         analysis_format="""Technical approach:
 1. <task> -> <specific approach with library/pattern choices> -> <why this approach>
 2. <task> -> <specific approach> -> <alternative considered and why rejected>
 ...
 
 Integration notes:
-- <how this fits with existing code>
-- <imports/dependencies needed>
+- <how this fits with existing code — reference specific files/functions from scan>
+- <imports/dependencies needed — are they already in the project?>
 
 Edge cases:
 - <edge case>: <how handled>
@@ -374,8 +393,22 @@ Caveats: <limitations or assumptions>""",
 - Include code snippets or pseudocode for key algorithms — do NOT just say "add feature X"
 - Include specific formulas, thresholds, or data structures where applicable
 - Reference THINKER's analysis and CHALLENGER's feedback — incorporate refinements
-- If scan context is available, use actual file paths and function names from the codebase
-- Each step must be specific enough that EXECUTOR can implement WITHOUT guessing""",
+- NEVER use placeholders like <exact file path> or <file> — use REAL paths from the scan context
+- If scan context mentions files like "backend/src/scorer/ats_scorer.py", use that EXACT path
+- Each step must be specific enough that EXECUTOR can implement WITHOUT guessing
+- Include quantified expected improvement (e.g., "reduces score variance by ~15 points")
+
+EXAMPLE of good plan step (follow this level of specificity):
+---
+Step 1: Add provider calibration layer -> backend/src/scorer/calibration.py (NEW FILE)
+  - Create `normalize_score(raw: float, provider: str) -> float` function
+  - Use z-score transform: `normalized = (raw - μ_provider) / σ_provider * σ_target + μ_target`
+  - Store calibration params in provider_calibration.json: {"openai": {"mean": 62, "std": 12}, ...}
+  - Fallback: if provider not in calibration data, return raw score unchanged
+Step 2: Decompose monolithic scoring prompt -> backend/src/scorer/prompts.py (MODIFY)
+  - Split single prompt into 3 focused prompts: extract_keywords, match_resume, score_matches
+  - Add scoring rubric: 90-100 = all required + bonus, 70-89 = 80%+ required, etc.
+---""",
         plan_format="""Execution plan:
   Step 1: <specific change description with code pattern> -> <exact file path> -> Executor: EXECUTOR
   Step 2: <specific change description> -> <exact file path> -> Executor: EXECUTOR
@@ -549,7 +582,14 @@ Strength of argument: STRONG / MODERATE / WEAK""",
 - Performance issues
 - Security vulnerabilities
 - Plan compliance (does it match what was requested?)
-Also write test cases for critical paths.""",
+Also write test cases for critical paths.
+
+IMPORTANT RULES:
+- Only reference line numbers you can actually see in the scan context — do NOT fabricate line numbers
+- Check that ALL requirements from the original task have a concrete solution (not just "will be done later")
+- Verify that code snippets are mathematically/logically correct (e.g., z-scores average to 0, not a useful combined score)
+- Check that the plan includes quantified improvement estimates
+- If file paths are placeholders like <exact file path>, mark as NOT MET""",
         review_format="""Plan compliance:
   <requirement met>
   <requirement partially met> -- missing: <what>

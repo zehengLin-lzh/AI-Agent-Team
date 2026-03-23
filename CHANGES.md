@@ -2,6 +2,31 @@
 
 ---
 
+## v3.1.0 — Accuracy Optimization Round 4 (2026-03-22)
+
+### Summary
+
+Further prompt optimizations to close the accuracy gap between local LLM agent team and frontier models. Gap reduced from 40 points (v1) to 21 points (v4) — within 1 point of the ≤20 target.
+
+### Changes
+
+- **PLANNER prompt**: Added few-shot example with exact file paths and code patterns, "NEVER use placeholders" rule, required quantified improvement estimates
+- **REVIEWER prompt**: Added rules against fabricating line numbers, checking for placeholder paths, verifying mathematical correctness
+- **THINKER prompt**: Added rules 8-9: always consider quick wins (temperature=0, seed, caching), count all requirements from ORCHESTRATOR
+- **RAG improvements**: Increased char budget 5000→8000, per-file limit 1200→2000, added explicit path labels "(Use this exact path in your plan: {path})"
+- **Scoring comparison**: Updated `data/scoring-comparison.md` with Round 3 and Round 4 results
+
+### Accuracy Progress
+
+| Version | Score | Gap |
+|---|---|---|
+| v1 (baseline) | 57/100 | 40 pts |
+| v2 (prompt optimization) | 71/100 | 26 pts |
+| v3 (RAG + few-shot) | 70/100 | 27 pts |
+| v4 (PLANNER/REVIEWER rules) | 76/100 | 21 pts |
+
+---
+
 ## v3.0.1 — Global CLI & Working Directory (2026-03-22)
 
 ### Summary

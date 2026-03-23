@@ -1257,6 +1257,49 @@ async def handle_scan_command(args: str):
 
     scan_result.append(f"\nTotal: {func_count} functions, {class_count} classes across {len(code_files)} code files")
 
+    # 3b. RAG — read content of key files (most important files by function count)
+    scan_result.append("\n## Key File Contents (RAG)")
+    # Score files by importance: more functions/classes = more important
+    file_scores = {}
+    for code_file in sorted(code_files)[:30]:
+        try:
+            content = code_file.read_text(errors="ignore")
+            rel_path = str(code_file.relative_to(scan_path_obj))
+            n_funcs = len(_re.findall(r"^(?:async\s+)?def\s+(\w+)\s*\(", content, _re.MULTILINE))
+            n_classes = len(_re.findall(r"^class\s+(\w+)", content, _re.MULTILINE))
+            # Boost files with "main", "app", "config", "scorer", "prompt" in name
+            name_boost = 0
+            for keyword in ("main", "app", "config", "scor", "prompt", "route", "model"):
+                if keyword in code_file.name.lower():
+                    name_boost += 3
+            file_scores[code_file] = n_funcs + n_classes * 2 + name_boost
+        except Exception:
+            continue
+
+    # Read top 5 most important files, cap at ~800 chars each
+    top_files = sorted(file_scores.items(), key=lambda x: -x[1])[:5]
+    rag_char_budget = 8000  # Total chars for RAG content
+    chars_used = 0
+    for code_file, score in top_files:
+        if chars_used >= rag_char_budget:
+            break
+        try:
+            content = code_file.read_text(errors="ignore")
+            rel_path = str(code_file.relative_to(scan_path_obj))
+            # Cap per file
+            per_file_limit = min(2000, rag_char_budget - chars_used)
+            if len(content) > per_file_limit:
+                content = content[:per_file_limit] + "\n... [truncated]"
+            scan_result.append(f"\n### FILE: {rel_path}")
+            scan_result.append(f"(Use this exact path in your plan: {rel_path})")
+            scan_result.append(f"```\n{content}\n```")
+            chars_used += len(content)
+        except Exception:
+            continue
+
+    if not top_files:
+        scan_result.append("  No key files found to read.")
+
     # 4. Config files
     scan_result.append("\n## Configuration")
     config_files = ["pyproject.toml", "package.json", "Cargo.toml", "go.mod",
