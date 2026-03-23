@@ -32,81 +32,24 @@ That's it. `mat-agent-cli` gives you the interactive terminal, `mat-agent` start
 
 ## Project Structure
 
-```
-AI Agent Team/
-├── bin/                              # Entry point scripts
-│   ├── mat-agent                     #   Launch backend + web UI
-│   ├── mat-agent-cli                 #   Interactive CLI (default entry point)
-│   └── start.sh                      #   Full stack startup script
-│
-├── src/agent_team/                   # Main Python package
-│   ├── config.py                     #   Global configuration
-│   ├── cli/                          #   CLI interfaces
-│   │   ├── interactive.py            #     Rich interactive REPL
-│   │   └── classic.py                #     Original Typer CLI
-│   ├── server/                       #   FastAPI backend
-│   │   └── app.py                    #     REST + WebSocket API
-│   ├── ui/                           #   Web interfaces
-│   │   ├── gradio_app.py             #     Gradio web UI
-│   │   └── static/index.html         #     Standalone web UI
-│   ├── agents/                       #   Agent definitions & orchestration
-│   │   ├── definitions.py            #     Agent roles, prompts, modes
-│   │   ├── runner.py                 #     Pipeline orchestrator (WebSocket)
-│   │   ├── http_runner.py            #     Pipeline orchestrator (HTTP)
-│   │   └── context.py                #     Context builder for agents
-│   ├── llm/                          #   LLM provider abstraction
-│   │   ├── base.py                   #     Abstract provider interface
-│   │   ├── registry.py               #     Provider registry & switching
-│   │   ├── keys.py                   #     API key management (.env storage)
-│   │   ├── openai_compat.py          #     OpenAI-compatible base class
-│   │   ├── providers.py              #     8 frontier providers
-│   │   ├── ollama_provider.py        #     Ollama provider
-│   │   └── huggingface_provider.py   #     HuggingFace provider
-│   ├── mcp/                          #   MCP integration
-│   │   ├── config.py                 #     Server config (mcp.json)
-│   │   ├── client.py                 #     Stdio client (JSON-RPC 2.0)
-│   │   ├── registry.py               #     Server & tool registry
-│   │   ├── triggers.py               #     Keyword trigger detection
-│   │   └── tool_executor.py          #     Parse & execute tool calls
-│   ├── ollama/                       #   Legacy Ollama client
-│   │   └── client.py                 #     Direct Ollama streaming
-│   ├── memory/                       #   Memory system
-│   │   ├── database.py               #     SQLite + vector storage
-│   │   ├── embeddings.py             #     Embedding generation
-│   │   ├── search.py                 #     Hybrid search (semantic + keyword)
-│   │   └── indexer.py                #     Session indexing
-│   ├── learning/                     #   Self-learning module
-│   │   ├── extractor.py              #     Knowledge extraction
-│   │   ├── patterns.py               #     Pattern recognition
-│   │   └── feedback.py               #     Feedback storage
-│   ├── files/                        #   File operations
-│   │   ├── writer.py                 #     Code file writer
-│   │   └── scaffolder.py             #     Directory scaffolding
-│   ├── plans/                        #   Plan persistence
-│   │   └── storage.py                #     Markdown plan storage
-│   ├── security/                     #   Security layer
-│   │   ├── sandbox.py                #     Command sandbox
-│   │   ├── validator.py              #     Input validation
-│   │   └── workspace.py              #     Workspace isolation
-│   └── skills/                       #   Skill system
-│       ├── registry.py               #     Skill registry
-│       ├── loader.py                 #     SKILL.md loader
-│       └── types.py                  #     Skill data types
-│
-├── skills/                           # Skill definitions (SKILL.md files)
-│   ├── thinking/
-│   ├── coding/
-│   ├── brainstorming/
-│   ├── architecture/
-│   └── execution/
-│
-├── data/                             # Runtime data (gitignored)
-├── plans/                            # Generated plans (gitignored)
-├── setup.sh                          # One-time installation script
-├── pyproject.toml                    # Dependencies & project config
-├── CHANGES.md                        # Version history
-└── .gitignore
-```
+| Directory | Purpose |
+|---|---|
+| `bin/` | Entry point scripts (`mat-agent-cli`, `mat-agent`, `start.sh`) |
+| `src/agent_team/` | Main Python package |
+| `src/agent_team/cli/` | Rich interactive REPL + classic CLI |
+| `src/agent_team/server/` | FastAPI backend (REST + WebSocket) |
+| `src/agent_team/ui/` | Gradio web UI + standalone HTML |
+| `src/agent_team/agents/` | Agent definitions, prompts, pipeline orchestrator, debate |
+| `src/agent_team/llm/` | LLM provider abstraction (10 providers, runtime switching) |
+| `src/agent_team/mcp/` | MCP integration (JSON-RPC 2.0 stdio client, tool registry) |
+| `src/agent_team/memory/` | SQLite + vector storage, hybrid search, session indexing |
+| `src/agent_team/learning/` | Self-learning (knowledge extraction, pattern recognition) |
+| `src/agent_team/files/` | Code file writer + directory scaffolding |
+| `src/agent_team/security/` | Command sandbox, input validation, workspace isolation |
+| `src/agent_team/skills/` | Skill registry + SKILL.md loader |
+| `skills/` | Skill definitions (thinking, coding, brainstorming, architecture, execution) |
+| `data/` | Runtime data — SQLite, sessions (gitignored) |
+| `plans/` | Generated plans (gitignored) |
 
 ---
 
@@ -216,24 +159,22 @@ Starts:
 
 ---
 
-## Accuracy Features
+## Version History & Accuracy Progress
 
-The agent team uses several techniques to maximize output quality:
+Each version improved the agent team's output quality, measured against frontier LLM (Claude Opus) on identical complex tasks.
 
-| Feature | Accuracy Impact | Description |
-|---|---|---|
-| **Agent Debate** | +10% | CHALLENGER reviews THINKER's analysis, catches gaps and edge cases |
-| **Repo Scanning** | +5% | `/scan` gives agents knowledge of existing code structure and patterns |
-| **Session Context** | +3% | Conversation history persists across requests for better follow-ups |
-| **Chain-of-Thought** | +5% | Explicit step-by-step reasoning prompts with self-verification |
-| **Thinking Model** | +5% | `qwen3:14b` used for analysis phases, default model for execution |
+| Version | Score | Gap | Key Changes |
+|---|---|---|---|
+| **v2.0** | — | — | File creation, plan storage, execution path fixes |
+| **v2.1** | — | — | Rich interactive CLI, token tracking, slash commands |
+| **v2.3** | — | — | 10 LLM providers, API key management |
+| **v2.5** | — | — | MCP integration, /ask & /chat commands |
+| **v3.0** | 57/100 | 40 pts | Agent debate, session context, /scan, chain-of-thought, thinking model |
+| **v3.0 r2** | 71/100 | 26 pts | Prompt optimization (specificity rules, stronger challenger) |
+| **v3.0 r3** | 70/100 | 27 pts | RAG file reading (top 5 files), few-shot examples in THINKER |
+| **v3.1** | 76/100 | 21 pts | PLANNER few-shot, REVIEWER rules, larger RAG budget (8000 chars) |
 
-**Result**: ~88-92% accuracy on complex tasks (within 10% of frontier LLMs).
-
-Configure the thinking model in `src/agent_team/config.py`:
-```python
-THINKING_MODEL = "qwen3:14b"  # Used for THINKER, CHALLENGER, debate phases
-```
+For detailed changelogs per version, see [CHANGES.md](CHANGES.md).
 
 ---
 
