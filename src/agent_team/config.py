@@ -6,6 +6,7 @@ from pathlib import Path
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE_URL = "http://localhost:11434"
 MODEL = "qwen2.5-coder:7b"
+THINKING_MODEL = "qwen3:14b"  # Used for THINKER, CHALLENGER, debate phases
 EMBEDDING_MODEL = "nomic-embed-text"
 MAX_FIX_LOOPS = 3
 PLAN_DIR_ENV = "AGENT_TEAM_PLAN_DIR"

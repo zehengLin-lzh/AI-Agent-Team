@@ -4,10 +4,11 @@ import json
 import re
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT
+from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, THINKING_MODEL
 from agent_team.agents.definitions import (
     AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, MODE_TEMPERATURES,
     get_agent_prompt, CONTEXT_AGENTS,
+    DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
 from agent_team.agents.context import build_context_for_agent
 from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model
@@ -25,6 +26,7 @@ class AgentTeam:
         self.original_plan = ""
         self.mode = AgentMode.CODING
         self.memory_context = ""
+        self.session_context = ""
         self.mcp_tools_prompt = ""  # MCP tool descriptions to inject into prompts
         self.mcp_registry = None    # MCPRegistry reference for tool execution
         self.token_tracker = SessionTokenTracker()
@@ -53,15 +55,33 @@ class AgentTeam:
             "role": "user",
             "content": f"Please proceed as {agent_name}.",
         })
-        output = await stream_llm(
-            system_prompt=system_prompt,
-            messages=messages,
-            ws=self.ws,
-            agent_name=agent_name,
-            agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
-            temperature=temperature,
-            token_tracker=self.token_tracker,
-        )
+
+        # Use thinking model for analysis agents (THINKER, REVIEWER)
+        use_thinking_model = agent_name in ("THINKER",) and THINKING_MODEL
+        original_model = None
+        if use_thinking_model:
+            try:
+                original_model = get_active_model()
+                from agent_team.llm import set_active_model
+                set_active_model(THINKING_MODEL)
+            except Exception:
+                use_thinking_model = False
+
+        try:
+            output = await stream_llm(
+                system_prompt=system_prompt,
+                messages=messages,
+                ws=self.ws,
+                agent_name=agent_name,
+                agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
+                temperature=temperature,
+                token_tracker=self.token_tracker,
+            )
+        finally:
+            # Restore original model if we swapped it
+            if use_thinking_model and original_model:
+                from agent_team.llm import set_active_model
+                set_active_model(original_model)
 
         # Execute any MCP tool calls found in the output
         if self.mcp_registry and "TOOL_CALL:" in output:
@@ -79,6 +99,14 @@ class AgentTeam:
                 pass
 
         self.phase_outputs[agent_name] = output
+
+        # Send agent output for session tracking
+        await self.ws.send_json({
+            "type": "agent_output",
+            "agent": agent_name,
+            "content": output[:2000],  # Cap to avoid huge payloads
+        })
+
         return output
 
     def needs_user_input(self, output: str) -> str | None:
@@ -121,6 +149,84 @@ class AgentTeam:
     async def run_thinker(self):
         await self.send_status("Phase 2: Deep analysis...", "think")
         await self.run_agent("THINKER")
+
+    async def run_debate(self):
+        """Run a debate between THINKER and CHALLENGER for higher accuracy."""
+        await self.send_status("Phase 2b: Agent debate — challenging analysis...", "debate")
+
+        # CHALLENGER reviews THINKER's output
+        thinker_output = self.phase_outputs.get("THINKER", "")
+        if not thinker_output:
+            return
+
+        # Use thinking model for debate if available
+        original_model = None
+        if THINKING_MODEL:
+            try:
+                original_model = get_active_model()
+                from agent_team.llm import set_active_model
+                set_active_model(THINKING_MODEL)
+            except Exception:
+                pass
+
+        try:
+            # Run challenger
+            temperature = MODE_TEMPERATURES.get(self.mode, 0.3)
+            challenge_messages = [
+                {"role": "user", "content": self.original_plan},
+                {"role": "assistant", "content": thinker_output},
+                {"role": "user", "content": "Please critically review the above analysis. Find weaknesses, gaps, and suggest improvements."},
+            ]
+
+            challenger_output = await stream_llm(
+                system_prompt=DEBATE_CHALLENGER_PROMPT,
+                messages=challenge_messages,
+                ws=self.ws,
+                agent_name="CHALLENGER",
+                agent_color="#ff6b6b",
+                temperature=temperature + 0.1,
+                token_tracker=self.token_tracker,
+            )
+            self.phase_outputs["CHALLENGER"] = challenger_output
+
+            await self.ws.send_json({
+                "type": "agent_output",
+                "agent": "CHALLENGER",
+                "content": challenger_output[:2000],
+            })
+
+            # THINKER responds to challenges
+            await self.send_status("Phase 2c: Refining analysis based on debate...", "debate")
+
+            response_messages = [
+                {"role": "user", "content": self.original_plan},
+                {"role": "assistant", "content": thinker_output},
+                {"role": "user", "content": f"A critical reviewer has raised these challenges:\n\n{challenger_output}\n\nPlease respond to each challenge and produce a refined analysis."},
+            ]
+
+            refined_output = await stream_llm(
+                system_prompt=DEBATE_RESPONSE_PROMPT,
+                messages=response_messages,
+                ws=self.ws,
+                agent_name="THINKER_REFINED",
+                agent_color="#c084fc",
+                temperature=temperature,
+                token_tracker=self.token_tracker,
+            )
+
+            # Replace THINKER output with refined version
+            self.phase_outputs["THINKER"] = refined_output
+
+            await self.ws.send_json({
+                "type": "agent_output",
+                "agent": "THINKER_REFINED",
+                "content": refined_output[:2000],
+            })
+        finally:
+            # Restore original model
+            if original_model:
+                from agent_team.llm import set_active_model
+                set_active_model(original_model)
 
     async def run_planner(self):
         await self.send_status("Phase 3: Planning...", "plan")
@@ -251,6 +357,13 @@ class AgentTeam:
             except Exception:
                 pass  # Memory not available yet, that's fine
 
+            # Inject session context
+            if self.session_context:
+                if self.memory_context:
+                    self.memory_context = f"{self.session_context}\n\n{self.memory_context}"
+                else:
+                    self.memory_context = self.session_context
+
             # Run the mode-specific pipeline
             phase_order = MODE_PHASE_ORDER.get(self.mode, MODE_PHASE_ORDER[AgentMode.CODING])
             for phase_group in phase_order:
@@ -265,6 +378,9 @@ class AgentTeam:
                     }.get(agent)
                     if handler:
                         await handler()
+                    # Run debate after THINKER for better accuracy
+                    if agent == "THINKER":
+                        await self.run_debate()
                 else:
                     # Parallel execution
                     tasks = []

@@ -39,6 +39,11 @@ async def websocket_endpoint(websocket: WebSocket):
         if data.get("type") == "start":
             team = AgentTeam(websocket, execution_path=data.get("execution_path"))
 
+            # Inject session context if provided
+            session_ctx = data.get("session_context", "")
+            if session_ctx:
+                team.session_context = session_ctx
+
             # Inject MCP tools if available
             try:
                 from agent_team.mcp.registry import MCPRegistry

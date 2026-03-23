@@ -39,19 +39,23 @@ from rich.spinner import Spinner
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError
 
+from agent_team.agents.session import SessionContext
+
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "2.5.1"
+APP_VERSION = "3.0.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
 AGENT_ICONS = {
-    "ORCHESTRATOR": "\u2692",   # ⚒
-    "THINKER": "\U0001f9e0",    # 🧠
-    "PLANNER": "\U0001f4d0",    # 📐
-    "EXECUTOR": "\u26a1",       # ⚡
-    "REVIEWER": "\U0001f50d",   # 🔍
+    "ORCHESTRATOR": "\u2692",        # ⚒
+    "THINKER": "\U0001f9e0",         # 🧠
+    "CHALLENGER": "\u2694",          # ⚔
+    "THINKER_REFINED": "\U0001f4a1", # 💡
+    "PLANNER": "\U0001f4d0",         # 📐
+    "EXECUTOR": "\u26a1",            # ⚡
+    "REVIEWER": "\U0001f50d",        # 🔍
 }
 
 MODE_ICONS = {
@@ -69,6 +73,8 @@ VALID_MODES = ["thinking", "coding", "brainstorming", "architecture", "execution
 custom_theme = Theme({
     "agent.orchestrator": "bold green",
     "agent.thinker": "bold magenta",
+    "agent.challenger": "bold red",
+    "agent.thinker_refined": "bold bright_magenta",
     "agent.planner": "bold yellow",
     "agent.executor": "bold cyan",
     "agent.reviewer": "bold red",
@@ -94,6 +100,11 @@ pt_style = PTStyle.from_dict({
 
 # ── State ────────────────────────────────────────────────────────────────────
 
+def _get_user_cwd() -> str:
+    """Get the directory the user launched mat-agent-cli from."""
+    return os.environ.get("MAT_AGENT_CWD", os.getcwd())
+
+
 @dataclass
 class CLIState:
     llm_provider: str = "ollama"
@@ -107,6 +118,8 @@ class CLIState:
     backend_connected: bool = False
     mcp_registry: object | None = None  # MCPRegistry instance
     skill_registry: object | None = None  # SkillRegistry instance
+    session: SessionContext = field(default_factory=SessionContext)
+    user_cwd: str = field(default_factory=_get_user_cwd)  # Where the user launched from
 
 state = CLIState()
 
@@ -292,6 +305,8 @@ def render_status_bar():
 
     mode_icon = MODE_ICONS.get(state.mode, "\U0001f4bb")
 
+    cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
+
     status.add_row(
         f"{conn_icon} {conn_text}",
         f"[accent]LLM:[/] {state.llm_provider}",
@@ -299,6 +314,7 @@ def render_status_bar():
         f"[accent]Mode:[/] {mode_icon} {state.mode}",
     )
     console.print(Panel(status, border_style="dim blue", padding=(0, 1)))
+    console.print(f"  [dim]Working directory: {cwd_display}[/]")
 
 
 def render_help():
@@ -335,6 +351,9 @@ def render_help():
         ("/mcp add <name>", "Add a new MCP server (interactive setup)"),
         ("/mcp search <query>", "Search for MCP servers by domain"),
         ("/mcp tools", "List all available MCP tools"),
+        ("/scan [path]", "Scan a directory to understand its structure (stored in session)"),
+        ("/cd <path>", "Change working directory"),
+        ("/pwd", "Show current working directory"),
         ("/skills", "List installed skills"),
         ("/exit, /quit", "Exit the CLI"),
     ]
@@ -413,6 +432,7 @@ def render_phase_header(phase: str, label: str):
     phase_icons = {
         "intake": "\U0001f4e5",   # 📥
         "think": "\U0001f914",    # 🤔
+        "debate": "\u2694\ufe0f", # ⚔️
         "plan": "\U0001f4cb",     # 📋
         "execute": "\u2699\ufe0f",  # ⚙️
         "verify": "\u2705",       # ✅
@@ -436,6 +456,8 @@ async def stream_conversation(
 ) -> dict | None:
     """Connect via WebSocket and stream the agent team output with rich formatting."""
 
+    state.session.add_user_message(plan_text)
+
     ws_mode = "plan_only" if plan_only else ("plan_and_execute" if execution_path else "plan_only")
 
     if execution_path:
@@ -452,6 +474,7 @@ async def stream_conversation(
                 "content": full_plan,
                 "mode": agent_mode if not plan_only else ws_mode,
                 "execution_path": execution_path,
+                "session_context": state.session.get_context_summary(),
             }))
 
             current_buffer = ""
@@ -517,6 +540,11 @@ async def stream_conversation(
                             title="[bold]\U0001f527 MCP Tool Results[/]",
                             border_style="green",
                         ))
+
+                elif t == "agent_output":
+                    agent = msg.get("agent", "")
+                    content = msg.get("content", "")
+                    state.session.add_agent_output(agent, content)
 
                 elif t == "learning_complete":
                     patterns = msg.get("patterns_extracted", 0)
@@ -1130,6 +1158,148 @@ async def handle_skills_command(args: str):
     console.print(f"[warning]Unknown: /skills {subcmd}. Try /skills or /skills reload[/]")
 
 
+async def handle_scan_command(args: str):
+    """Scan a repository/directory to understand its structure."""
+    import re as _re
+
+    scan_path = args.strip() or state.user_cwd
+    scan_path = os.path.expanduser(scan_path)
+
+    if not Path(scan_path).exists():
+        console.print(f"[error]Path does not exist: {scan_path}[/]")
+        return
+
+    console.print(f"[dim]Scanning: {scan_path}...[/]")
+
+    scan_result = []
+    scan_path_obj = Path(scan_path)
+
+    # 1. Directory structure (max depth 3)
+    scan_result.append("## Directory Structure")
+    file_count = 0
+    dir_count = 0
+    extensions = {}
+
+    for item in sorted(scan_path_obj.rglob("*")):
+        # Skip hidden dirs, venv, node_modules, __pycache__, .git
+        parts = item.relative_to(scan_path_obj).parts
+        if any(p.startswith(".") or p in ("__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".git") for p in parts):
+            continue
+
+        rel = item.relative_to(scan_path_obj)
+        depth = len(rel.parts)
+        if depth > 3:
+            continue
+
+        if item.is_file():
+            file_count += 1
+            ext = item.suffix.lower()
+            extensions[ext] = extensions.get(ext, 0) + 1
+            if depth <= 3:
+                indent = "  " * (depth - 1)
+                scan_result.append(f"{indent}├── {item.name}")
+        elif item.is_dir():
+            dir_count += 1
+            indent = "  " * (depth - 1)
+            scan_result.append(f"{indent}├── {item.name}/")
+
+    scan_result.append(f"\nTotal: {file_count} files, {dir_count} directories")
+    scan_result.append(f"Extensions: {', '.join(f'{k}({v})' for k, v in sorted(extensions.items(), key=lambda x: -x[1])[:10])}")
+
+    # 2. Key files analysis (read important files)
+    scan_result.append("\n## Key Files")
+    key_patterns = ["*.py", "*.js", "*.ts", "*.jsx", "*.tsx", "*.go", "*.rs", "*.java"]
+    code_files = []
+    for pattern in key_patterns:
+        code_files.extend(scan_path_obj.rglob(pattern))
+
+    # Filter out hidden/cache dirs
+    code_files = [
+        f for f in code_files
+        if not any(p.startswith(".") or p in ("__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".git")
+                   for p in f.relative_to(scan_path_obj).parts)
+    ]
+
+    # 3. Extract functions/classes from code files (up to 20 files)
+    scan_result.append("\n## Functions & Classes")
+    func_count = 0
+    class_count = 0
+
+    for code_file in sorted(code_files)[:20]:
+        try:
+            content = code_file.read_text(errors="ignore")
+            rel_path = code_file.relative_to(scan_path_obj)
+
+            # Python patterns
+            funcs = _re.findall(r"^(?:async\s+)?def\s+(\w+)\s*\(", content, _re.MULTILINE)
+            classes = _re.findall(r"^class\s+(\w+)", content, _re.MULTILINE)
+
+            # JS/TS patterns
+            if code_file.suffix in (".js", ".ts", ".jsx", ".tsx"):
+                funcs += _re.findall(r"(?:export\s+)?(?:async\s+)?function\s+(\w+)", content)
+                funcs += _re.findall(r"(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?\(", content)
+                classes += _re.findall(r"(?:export\s+)?class\s+(\w+)", content)
+
+            if funcs or classes:
+                scan_result.append(f"\n  {rel_path}:")
+                if classes:
+                    class_count += len(classes)
+                    scan_result.append(f"    Classes: {', '.join(classes)}")
+                if funcs:
+                    func_count += len(funcs)
+                    # Show max 10 functions per file
+                    displayed = funcs[:10]
+                    remaining = len(funcs) - 10
+                    scan_result.append(f"    Functions: {', '.join(displayed)}" +
+                                     (f" (+{remaining} more)" if remaining > 0 else ""))
+        except Exception:
+            continue
+
+    scan_result.append(f"\nTotal: {func_count} functions, {class_count} classes across {len(code_files)} code files")
+
+    # 4. Config files
+    scan_result.append("\n## Configuration")
+    config_files = ["pyproject.toml", "package.json", "Cargo.toml", "go.mod",
+                    "requirements.txt", "Makefile", "Dockerfile", ".env.example",
+                    "tsconfig.json", "setup.py", "setup.cfg"]
+    found_configs = []
+    for cf in config_files:
+        if (scan_path_obj / cf).exists():
+            found_configs.append(cf)
+    if found_configs:
+        scan_result.append(f"  Found: {', '.join(found_configs)}")
+    else:
+        scan_result.append("  No standard config files found")
+
+    # 5. README if exists
+    readme_path = scan_path_obj / "README.md"
+    if not readme_path.exists():
+        readme_path = scan_path_obj / "readme.md"
+    if readme_path.exists():
+        try:
+            readme_content = readme_path.read_text(errors="ignore")
+            # Just the first ~500 chars
+            scan_result.append(f"\n## README Summary\n{readme_content[:500]}")
+        except Exception:
+            pass
+
+    scan_text = "\n".join(scan_result)
+
+    # Store in session
+    state.session.add_scan_result(scan_text)
+
+    # Display summary
+    console.print(Panel(
+        f"[bold green]Scan complete![/]\n"
+        f"  Files: {file_count}  |  Directories: {dir_count}\n"
+        f"  Code files: {len(code_files)}  |  Functions: {func_count}  |  Classes: {class_count}\n"
+        f"  Config: {', '.join(found_configs) if found_configs else 'none'}\n\n"
+        f"[dim]Scan context stored in session. Agents will use this for better responses.[/]",
+        title="[bold]\U0001f4c2 Repository Scan[/]",
+        border_style="cyan",
+    ))
+
+
 async def handle_chat_mode(initial_message: str = ""):
     """Enter interactive chat mode — direct conversation with the LLM.
     Each session is stateless (no memory context carried over)."""
@@ -1319,54 +1489,32 @@ def auto_detect_mode(text: str) -> str:
 
 # ── Plan Confirmation Flow ───────────────────────────────────────────────────
 
-async def confirm_execution(plan_text: str, detected_mode: str) -> tuple[bool, str | None, bool]:
-    """
-    Ask user to confirm before execution.
-    Returns: (should_proceed, execution_path, plan_only)
-    """
+async def ask_execute_location() -> tuple[str | None, bool]:
+    """After planning is complete, ask user if/where to execute.
+    Returns: (execution_path, should_execute)"""
     console.print()
-    console.print(Panel(
-        f"[bold]Mode:[/] {MODE_ICONS.get(detected_mode, '')} {detected_mode}\n"
-        f"[bold]Task:[/] {plan_text[:200]}{'...' if len(plan_text) > 200 else ''}",
-        title="[bold cyan]\U0001f680 Ready to process[/]",
-        border_style="cyan",
-    ))
+    console.print("[bold]Execute this plan?[/]")
+    console.print("  [cyan]1)[/] No, just keep the plan")
+    console.print("  [cyan]2)[/] Execute in current directory")
+    console.print("  [cyan]3)[/] Execute in custom directory")
+    console.print()
 
-    if detected_mode in ("coding", "execution"):
-        console.print("\n[bold]How should this be handled?[/]")
-        console.print("  [cyan]1)[/] Plan only (analyze and plan, no file changes)")
-        console.print("  [cyan]2)[/] Plan + Execute in current directory")
-        console.print("  [cyan]3)[/] Plan + Execute in custom directory")
-        console.print("  [cyan]c)[/] Cancel")
-        console.print()
+    choice = input("  Select [1/2/3]: ").strip()
 
-        choice = input("  Select [1/2/3/c]: ").strip().lower()
-
-        if choice == "c":
-            console.print("[muted]Cancelled.[/]")
-            return False, None, False
-        elif choice == "2":
-            cwd = os.getcwd()
-            console.print(f"  [dim]Execution path: {cwd}[/]")
-            return True, cwd, False
-        elif choice == "3":
-            path = input("  Enter directory path: ").strip()
-            if path and Path(path).exists():
-                return True, path, False
-            elif path:
-                console.print(f"[warning]Path does not exist: {path}[/]")
-                return False, None, False
-            else:
-                return True, None, True
-        else:
-            return True, None, True
+    if choice == "2":
+        cwd = state.user_cwd
+        console.print(f"  [dim]Execution path: {cwd}[/]")
+        return cwd, True
+    elif choice == "3":
+        path = input("  Enter directory path: ").strip()
+        if path and Path(path).exists():
+            return path, True
+        elif path:
+            console.print(f"[warning]Path does not exist: {path}[/]")
+            return None, False
+        return None, False
     else:
-        console.print("\n[bold]Proceed?[/] [cyan](y/n)[/] ", end="")
-        confirm = input().strip().lower()
-        if confirm in ("n", "no", "c", "cancel"):
-            console.print("[muted]Cancelled.[/]")
-            return False, None, False
-        return True, None, True
+        return None, False
 
 
 # ── Follow-up Handler ────────────────────────────────────────────────────────
@@ -1389,10 +1537,14 @@ def get_bottom_toolbar():
     mode_icon = MODE_ICONS.get(state.mode, "")
     tokens = f" | Tokens: {state.total_session_tokens}" if state.total_session_tokens else ""
 
+    # Shorten the cwd for display
+    cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
+
     return HTML(
         f'<style bg="#1a1a2e" fg="{conn_color}"> {conn} </style>'
-        f'<style bg="#1a1a2e" fg="#aaaaaa"> | LLM: {state.llm_provider} | Model: {state.model} | '
-        f'Mode: {mode_icon} {state.mode}{tokens} | /help for commands </style>'
+        f'<style bg="#1a1a2e" fg="#aaaaaa"> | {cwd_display} | '
+        f'{state.llm_provider}/{state.model} | '
+        f'{mode_icon} {state.mode}{tokens} | /help </style>'
     )
 
 
@@ -1483,12 +1635,34 @@ async def main():
                 elif cmd == "/skills":
                     await handle_skills_command(args)
 
+                elif cmd == "/scan":
+                    await handle_scan_command(args)
+
                 elif cmd == "/status":
                     await check_backend()
                     render_status_bar()
 
                 elif cmd == "/tokens":
                     render_token_summary()
+
+                elif cmd == "/cd":
+                    new_dir = args.strip() if args else ""
+                    if not new_dir:
+                        console.print(f"[dim]Current: {state.user_cwd}[/]")
+                        console.print("[warning]Usage: /cd <path>[/]")
+                    else:
+                        new_dir = os.path.expanduser(new_dir)
+                        if not os.path.isabs(new_dir):
+                            new_dir = os.path.join(state.user_cwd, new_dir)
+                        new_dir = os.path.realpath(new_dir)
+                        if os.path.isdir(new_dir):
+                            state.user_cwd = new_dir
+                            console.print(f"[success]Working directory: {new_dir}[/]")
+                        else:
+                            console.print(f"[error]Not a directory: {new_dir}[/]")
+
+                elif cmd == "/pwd":
+                    console.print(f"[accent]{state.user_cwd}[/]")
 
                 elif cmd == "/clear":
                     console.clear()
@@ -1533,9 +1707,14 @@ async def main():
                     detected = auto_detect_mode(args)
                     if detected not in ("coding", "execution"):
                         detected = "coding"
-                    proceed, exec_path, plan_only = await confirm_execution(args, detected)
-                    if proceed:
-                        await stream_conversation(args, detected, execution_path=exec_path, plan_only=plan_only)
+                    # Plan first
+                    console.print(f"[dim]Planning in {detected} mode...[/]")
+                    await stream_conversation(args, detected, plan_only=True)
+                    state.conversation_count += 1
+                    # Then ask where to execute
+                    exec_path, should_exec = await ask_execute_location()
+                    if should_exec and exec_path:
+                        await stream_conversation(args, detected, execution_path=exec_path, plan_only=False)
                         state.conversation_count += 1
 
                 else:
@@ -1559,16 +1738,19 @@ async def main():
             # Check for MCP/skills triggers
             await check_tool_triggers(user_input)
 
-            # Confirm before proceeding
-            proceed, exec_path, plan_only = await confirm_execution(user_input, detected_mode)
-            if not proceed:
-                continue
-
-            await stream_conversation(
-                user_input, detected_mode,
-                execution_path=exec_path, plan_only=plan_only,
-            )
+            # Default: plan-only first
+            await stream_conversation(user_input, detected_mode, plan_only=True)
             state.conversation_count += 1
+
+            # For coding/execution modes, offer to execute after planning
+            if detected_mode in ("coding", "execution"):
+                exec_path, should_exec = await ask_execute_location()
+                if should_exec and exec_path:
+                    await stream_conversation(
+                        user_input, detected_mode,
+                        execution_path=exec_path, plan_only=False,
+                    )
+                    state.conversation_count += 1
 
             # Follow-up
             followup = await handle_followup()
@@ -1576,6 +1758,12 @@ async def main():
                 detected2 = auto_detect_mode(followup)
                 await stream_conversation(followup, detected2, plan_only=True)
                 state.conversation_count += 1
+                # Offer execution for follow-ups too
+                if detected2 in ("coding", "execution"):
+                    ep, se = await ask_execute_location()
+                    if se and ep:
+                        await stream_conversation(followup, detected2, execution_path=ep, plan_only=False)
+                        state.conversation_count += 1
                 followup = await handle_followup()
 
         except KeyboardInterrupt:
