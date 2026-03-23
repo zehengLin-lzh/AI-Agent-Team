@@ -173,6 +173,7 @@ Each version improved the agent team's output quality, measured against frontier
 | **v3.0 r2** | 71/100 | 26 pts | Prompt optimization (specificity rules, stronger challenger) |
 | **v3.0 r3** | 70/100 | 27 pts | RAG file reading (top 5 files), few-shot examples in THINKER |
 | **v3.1** | 76/100 | 21 pts | PLANNER few-shot, REVIEWER rules, larger RAG budget (8000 chars) |
+| **v4.0** | — | — | Pipeline fixes, plan reuse, 3-tier model routing, scan security, path auto-detect, file traceability |
 
 For detailed changelogs per version, see [CHANGES.md](CHANGES.md).
 

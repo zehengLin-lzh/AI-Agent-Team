@@ -44,7 +44,7 @@ from agent_team.agents.session import SessionContext
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -453,12 +453,13 @@ async def stream_conversation(
     agent_mode: str,
     execution_path: str | None = None,
     plan_only: bool = False,
-) -> dict | None:
-    """Connect via WebSocket and stream the agent team output with rich formatting."""
+    reuse_plan: bool = False,
+    phase_outputs: dict | None = None,
+) -> tuple[dict | None, dict]:
+    """Connect via WebSocket and stream the agent team output with rich formatting.
+    Returns (token_summary, collected_phase_outputs)."""
 
     state.session.add_user_message(plan_text)
-
-    ws_mode = "plan_only" if plan_only else ("plan_and_execute" if execution_path else "plan_only")
 
     if execution_path:
         full_plan = f"{plan_text}\n\nExecution context:\n- Requested path: {execution_path}\n- Mode: {agent_mode}"
@@ -466,16 +467,23 @@ async def stream_conversation(
         full_plan = f"{plan_text}\n\nExecution context:\n- No execution path selected\n- Mode: {agent_mode}"
 
     token_summary = None
+    collected_outputs: dict[str, str] = {}
 
     try:
         async with ws_connect(ws_url(), max_size=10 * 1024 * 1024) as ws:
-            await ws.send(json.dumps({
+            start_msg: dict = {
                 "type": "start",
                 "content": full_plan,
-                "mode": agent_mode if not plan_only else ws_mode,
+                "mode": agent_mode,
+                "plan_only": plan_only,
                 "execution_path": execution_path,
                 "session_context": state.session.get_context_summary(),
-            }))
+            }
+            # A5: reuse prior plan outputs — skip re-thinking
+            if reuse_plan and phase_outputs:
+                start_msg["reuse_plan"] = True
+                start_msg["phase_outputs"] = phase_outputs
+            await ws.send(json.dumps(start_msg))
 
             current_buffer = ""
             current_agent = None
@@ -545,6 +553,18 @@ async def stream_conversation(
                     agent = msg.get("agent", "")
                     content = msg.get("content", "")
                     state.session.add_agent_output(agent, content)
+                    collected_outputs[agent] = content
+
+                elif t == "files_written":
+                    files = msg.get("files", [])
+                    base = msg.get("base_dir", "")
+                    if files:
+                        lines = [f"  [green]\u25b8[/] {f}" for f in files]
+                        console.print(Panel(
+                            "\n".join(lines),
+                            title=f"[bold]\U0001f4c1 Files Written[/] [dim]({base})[/]",
+                            border_style="green",
+                        ))
 
                 elif t == "learning_complete":
                     patterns = msg.get("patterns_extracted", 0)
@@ -586,7 +606,7 @@ async def stream_conversation(
     except ConnectionRefusedError:
         console.print("[error]Cannot connect to backend. Try /status to reconnect.[/]")
 
-    return token_summary
+    return token_summary, collected_outputs
 
 
 # ── Slash Command Handlers ───────────────────────────────────────────────────
@@ -1161,6 +1181,7 @@ async def handle_skills_command(args: str):
 async def handle_scan_command(args: str):
     """Scan a repository/directory to understand its structure."""
     import re as _re
+    from agent_team.config import SENSITIVE_FILE_PATTERNS, SENSITIVE_EXTENSIONS, SENSITIVE_CONTENT_RE
 
     scan_path = args.strip() or state.user_cwd
     scan_path = os.path.expanduser(scan_path)
@@ -1171,8 +1192,21 @@ async def handle_scan_command(args: str):
 
     console.print(f"[dim]Scanning: {scan_path}...[/]")
 
+    def _is_sensitive_file(file_path: Path) -> bool:
+        name_lower = file_path.name.lower()
+        for pattern in SENSITIVE_FILE_PATTERNS:
+            if pattern in name_lower:
+                return True
+        if file_path.suffix.lower() in SENSITIVE_EXTENSIONS:
+            return True
+        return False
+
+    def _redact_sensitive(content: str) -> str:
+        return _re.sub(SENSITIVE_CONTENT_RE, lambda m: m.group(1) + "=***REDACTED***", content)
+
     scan_result = []
     scan_path_obj = Path(scan_path)
+    sensitive_skipped = 0
 
     # 1. Directory structure (max depth 3)
     scan_result.append("## Directory Structure")
@@ -1191,17 +1225,22 @@ async def handle_scan_command(args: str):
         if depth > 3:
             continue
 
+        # A4: Skip sensitive files
+        if item.is_file() and _is_sensitive_file(item):
+            sensitive_skipped += 1
+            continue
+
         if item.is_file():
             file_count += 1
             ext = item.suffix.lower()
             extensions[ext] = extensions.get(ext, 0) + 1
             if depth <= 3:
                 indent = "  " * (depth - 1)
-                scan_result.append(f"{indent}├── {item.name}")
+                scan_result.append(f"{indent}\u251c\u2500\u2500 {item.name}")
         elif item.is_dir():
             dir_count += 1
             indent = "  " * (depth - 1)
-            scan_result.append(f"{indent}├── {item.name}/")
+            scan_result.append(f"{indent}\u251c\u2500\u2500 {item.name}/")
 
     scan_result.append(f"\nTotal: {file_count} files, {dir_count} directories")
     scan_result.append(f"Extensions: {', '.join(f'{k}({v})' for k, v in sorted(extensions.items(), key=lambda x: -x[1])[:10])}")
@@ -1213,11 +1252,12 @@ async def handle_scan_command(args: str):
     for pattern in key_patterns:
         code_files.extend(scan_path_obj.rglob(pattern))
 
-    # Filter out hidden/cache dirs
+    # Filter out hidden/cache dirs and sensitive files
     code_files = [
         f for f in code_files
         if not any(p.startswith(".") or p in ("__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".git")
                    for p in f.relative_to(scan_path_obj).parts)
+        and not _is_sensitive_file(f)
     ]
 
     # 3. Extract functions/classes from code files (up to 20 files)
@@ -1285,6 +1325,8 @@ async def handle_scan_command(args: str):
             break
         try:
             content = code_file.read_text(errors="ignore")
+            # A4: Redact sensitive values in file content
+            content = _redact_sensitive(content)
             rel_path = str(code_file.relative_to(scan_path_obj))
             # Cap per file
             per_file_limit = min(2000, rag_char_budget - chars_used)
@@ -1332,11 +1374,13 @@ async def handle_scan_command(args: str):
     state.session.add_scan_result(scan_text)
 
     # Display summary
+    sensitive_msg = f"\n  [warning]Sensitive files skipped: {sensitive_skipped}[/]" if sensitive_skipped else ""
     console.print(Panel(
         f"[bold green]Scan complete![/]\n"
         f"  Files: {file_count}  |  Directories: {dir_count}\n"
         f"  Code files: {len(code_files)}  |  Functions: {func_count}  |  Classes: {class_count}\n"
-        f"  Config: {', '.join(found_configs) if found_configs else 'none'}\n\n"
+        f"  Config: {', '.join(found_configs) if found_configs else 'none'}"
+        f"{sensitive_msg}\n\n"
         f"[dim]Scan context stored in session. Agents will use this for better responses.[/]",
         title="[bold]\U0001f4c2 Repository Scan[/]",
         border_style="cyan",
@@ -1359,52 +1403,67 @@ async def handle_chat_mode(initial_message: str = ""):
     # Use call_llm directly (bypasses backend WebSocket)
     from agent_team.llm import call_llm
     from agent_team.llm.registry import get_active_provider_name
+    from agent_team.config import MODEL_ROUTING
+    from agent_team.llm import get_active_model, set_active_model
 
     system_prompt = (
         "You are a helpful AI assistant. Answer questions clearly and concisely. "
         "If the user asks for code, provide well-formatted code with explanations."
     )
 
+    # A6: Route to fast model for chat
+    chat_model = MODEL_ROUTING.get("chat")
+    original_model = get_active_model()
+    did_swap = False
+    if chat_model and chat_model != original_model:
+        set_active_model(chat_model)
+        did_swap = True
+
+    display_model = chat_model or original_model
     session = PromptSession(style=pt_style)
 
     # Process initial message if provided
     if initial_message:
         await _chat_send(initial_message, system_prompt, call_llm)
 
-    while True:
-        try:
-            user_input = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: session.prompt(
-                    HTML(f'<style fg="#00d4aa" bold="true">{state.llm_provider} \u276f </style>'),
-                    bottom_toolbar=lambda: HTML(
-                        f'<style bg="#1a1a2e" fg="#aaaaaa"> Chat Mode | '
-                        f'{state.llm_provider}/{state.model} | '
-                        f'/back to return </style>'
+    try:
+        while True:
+            try:
+                user_input = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: session.prompt(
+                        HTML(f'<style fg="#00d4aa" bold="true">{state.llm_provider} \u276f </style>'),
+                        bottom_toolbar=lambda: HTML(
+                            f'<style bg="#1a1a2e" fg="#aaaaaa"> Chat Mode | '
+                            f'{state.llm_provider}/{display_model} | '
+                            f'/back to return </style>'
+                        ),
                     ),
-                ),
-            )
+                )
 
-            user_input = user_input.strip()
-            if not user_input:
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+
+                if user_input.lower() in ("/back", "/exit", "/quit", "/q"):
+                    console.print("[dim]Returning to main CLI...[/]\n")
+                    break
+
+                if user_input.lower() == "/clear":
+                    console.clear()
+                    continue
+
+                await _chat_send(user_input, system_prompt, call_llm)
+
+            except KeyboardInterrupt:
+                console.print("\n[dim]Type /back to return to main CLI[/]")
                 continue
-
-            if user_input.lower() in ("/back", "/exit", "/quit", "/q"):
+            except EOFError:
                 console.print("[dim]Returning to main CLI...[/]\n")
                 break
-
-            if user_input.lower() == "/clear":
-                console.clear()
-                continue
-
-            await _chat_send(user_input, system_prompt, call_llm)
-
-        except KeyboardInterrupt:
-            console.print("\n[dim]Type /back to return to main CLI[/]")
-            continue
-        except EOFError:
-            console.print("[dim]Returning to main CLI...[/]\n")
-            break
+    finally:
+        if did_swap:
+            set_active_model(original_model)
 
 
 async def _chat_send(message: str, system_prompt: str, call_fn):
@@ -1443,19 +1502,32 @@ async def handle_ask_command(question: str):
         console.print("[warning]Usage: /ask <your question>[/]")
         return
 
+    from agent_team.config import MODEL_ROUTING
+    from agent_team.llm import call_llm, get_active_model, set_active_model
+
+    # A6: Route to fast model for ask
+    ask_model = MODEL_ROUTING.get("ask")
+    original_model = get_active_model()
+    did_swap = False
+    if ask_model and ask_model != original_model:
+        set_active_model(ask_model)
+        did_swap = True
+
     console.print()
     console.print(Panel(
-        f"[dim]Asking [cyan]{state.llm_provider}/{state.model}[/] (no context, single response)[/]",
+        f"[dim]Asking [cyan]{state.llm_provider}/{ask_model or original_model}[/] (no context, single response)[/]",
         title="[bold]\u2753 Ask[/]",
         border_style="cyan",
     ))
 
-    from agent_team.llm import call_llm
-
-    await _chat_send(question, (
-        "You are a helpful AI assistant. Answer the question clearly and concisely. "
-        "Provide well-formatted answers with code examples where appropriate."
-    ), call_llm)
+    try:
+        await _chat_send(question, (
+            "You are a helpful AI assistant. Answer the question clearly and concisely. "
+            "Provide well-formatted answers with code examples where appropriate."
+        ), call_llm)
+    finally:
+        if did_swap:
+            set_active_model(original_model)
 
 
 async def check_tool_triggers(text: str) -> bool:
@@ -1528,6 +1600,30 @@ def auto_detect_mode(text: str) -> str:
     if any(kw in lower for kw in ["run", "execute", "deploy", "start", "build and run"]):
         return "execution"
     return state.mode
+
+
+def extract_path_from_text(text: str) -> str | None:
+    """Extract an absolute or ~-prefixed directory path from user text."""
+    import re as _re
+    # Strategy: find absolute paths starting with / or ~/, then progressively
+    # shorten from the right until we find a path that actually exists.
+    match = _re.search(r'(?:^|\s)((?:/[^\n]+?))\s*(?:$|and\b|then\b|,|\))', text, _re.IGNORECASE)
+    if not match:
+        match = _re.search(r'(?:^|\s)(~(?:/[^\n]+?))\s*(?:$|and\b|then\b|,|\))', text, _re.IGNORECASE)
+    if match:
+        candidate = match.group(1).strip()
+        expanded = os.path.expanduser(candidate)
+        if Path(expanded).is_dir():
+            return expanded
+        # Try progressively removing trailing words (handles "path and do X")
+        parts = candidate.rsplit(" ", 1)
+        while len(parts) > 1:
+            candidate = parts[0].strip()
+            expanded = os.path.expanduser(candidate)
+            if Path(expanded).is_dir():
+                return expanded
+            parts = candidate.rsplit(" ", 1)
+    return None
 
 
 # ── Plan Confirmation Flow ───────────────────────────────────────────────────
@@ -1732,12 +1828,12 @@ async def main():
                         continue
                     detected = auto_detect_mode(args)
                     console.print(f"[dim]Auto-detected mode: {MODE_ICONS.get(detected, '')} {detected}[/]")
-                    await stream_conversation(args, detected, plan_only=True)
+                    _, _ = await stream_conversation(args, detected, plan_only=True)
                     state.conversation_count += 1
                     followup = await handle_followup()
                     if followup:
                         detected2 = auto_detect_mode(followup)
-                        await stream_conversation(followup, detected2, plan_only=True)
+                        _, _ = await stream_conversation(followup, detected2, plan_only=True)
                         state.conversation_count += 1
 
                 elif cmd == "/exec":
@@ -1752,12 +1848,22 @@ async def main():
                         detected = "coding"
                     # Plan first
                     console.print(f"[dim]Planning in {detected} mode...[/]")
-                    await stream_conversation(args, detected, plan_only=True)
+                    _, plan_outputs = await stream_conversation(args, detected, plan_only=True)
                     state.conversation_count += 1
-                    # Then ask where to execute
-                    exec_path, should_exec = await ask_execute_location()
+                    # A3: Auto-detect path from input
+                    detected_path = extract_path_from_text(args)
+                    if detected_path:
+                        console.print(f"[dim]Detected path: {detected_path} \u2014 executing here[/]")
+                        exec_path, should_exec = detected_path, True
+                    else:
+                        exec_path, should_exec = await ask_execute_location()
                     if should_exec and exec_path:
-                        await stream_conversation(args, detected, execution_path=exec_path, plan_only=False)
+                        # A5: Reuse plan — skip re-thinking
+                        await stream_conversation(
+                            args, detected,
+                            execution_path=exec_path, plan_only=False,
+                            reuse_plan=True, phase_outputs=plan_outputs,
+                        )
                         state.conversation_count += 1
 
                 else:
@@ -1782,16 +1888,24 @@ async def main():
             await check_tool_triggers(user_input)
 
             # Default: plan-only first
-            await stream_conversation(user_input, detected_mode, plan_only=True)
+            _, plan_outputs = await stream_conversation(user_input, detected_mode, plan_only=True)
             state.conversation_count += 1
 
             # For coding/execution modes, offer to execute after planning
             if detected_mode in ("coding", "execution"):
-                exec_path, should_exec = await ask_execute_location()
+                # A3: Auto-detect path from user input
+                detected_path = extract_path_from_text(user_input)
+                if detected_path:
+                    console.print(f"[dim]Detected path: {detected_path} \u2014 executing here[/]")
+                    exec_path, should_exec = detected_path, True
+                else:
+                    exec_path, should_exec = await ask_execute_location()
                 if should_exec and exec_path:
+                    # A5: Reuse plan — skip re-thinking
                     await stream_conversation(
                         user_input, detected_mode,
                         execution_path=exec_path, plan_only=False,
+                        reuse_plan=True, phase_outputs=plan_outputs,
                     )
                     state.conversation_count += 1
 
@@ -1799,13 +1913,22 @@ async def main():
             followup = await handle_followup()
             while followup:
                 detected2 = auto_detect_mode(followup)
-                await stream_conversation(followup, detected2, plan_only=True)
+                _, followup_outputs = await stream_conversation(followup, detected2, plan_only=True)
                 state.conversation_count += 1
                 # Offer execution for follow-ups too
                 if detected2 in ("coding", "execution"):
-                    ep, se = await ask_execute_location()
+                    fp = extract_path_from_text(followup)
+                    if fp:
+                        console.print(f"[dim]Detected path: {fp} \u2014 executing here[/]")
+                        ep, se = fp, True
+                    else:
+                        ep, se = await ask_execute_location()
                     if se and ep:
-                        await stream_conversation(followup, detected2, execution_path=ep, plan_only=False)
+                        await stream_conversation(
+                            followup, detected2,
+                            execution_path=ep, plan_only=False,
+                            reuse_plan=True, phase_outputs=followup_outputs,
+                        )
                         state.conversation_count += 1
                 followup = await handle_followup()
 

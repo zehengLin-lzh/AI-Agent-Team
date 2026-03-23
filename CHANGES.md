@@ -2,6 +2,34 @@
 
 ---
 
+## v4.0.0 — Pipeline Fixes, Model Routing & Security (2026-03-23)
+
+### Summary
+
+Major reliability and UX overhaul based on real-world testing on a second machine. Fixes 5 critical pipeline issues, adds three-tier model routing, scan security, and execution traceability.
+
+### Pipeline Fixes
+- **A1: Fix plan_only mode** — Previously sent invalid `"plan_only"` as AgentMode, causing EXECUTOR to run during planning. Now sends real mode + separate `plan_only` boolean; EXECUTOR properly skipped in plan-only.
+- **A5: Plan reuse on execute** — After planning, choosing "execute" no longer re-runs the entire pipeline (ORCHESTRATOR → THINKER → CHALLENGER → PLANNER). Instead, prior phase outputs are reused and pipeline jumps directly to EXECUTOR → REVIEWER.
+- **A3: Path auto-detection** — If user input contains a path (e.g., "optimize /Users/me/project"), the CLI auto-detects it and skips the 1/2/3 execution prompt.
+
+### New Features
+- **A6: Three-tier model routing** — Configurable per-agent model selection:
+  - Fast model (chat/ask/orchestrator) — lightweight conversation
+  - Reasoning model (thinker/planner/reviewer) — logical analysis
+  - Coding model (executor) — code generation
+  - Config: `MODEL_ROUTING` dict in `config.py`, replaces hardcoded thinking model checks
+- **A2: Execution traceability** — After EXECUTOR writes files, CLI displays a panel listing all absolute file paths written. Users can find output on any machine.
+- **A4: Scan security** — `/scan` now filters sensitive files (.env, credentials, .pem, service accounts) and redacts secrets (API keys, passwords, tokens) from RAG content before sending to LLM.
+
+### Files Modified
+- `src/agent_team/config.py` — Added `MODEL_ROUTING`, `FAST_MODEL`, `REASONING_MODEL`, `CODING_MODEL`, `SENSITIVE_FILE_PATTERNS`, `SENSITIVE_EXTENSIONS`, `SENSITIVE_CONTENT_RE`
+- `src/agent_team/agents/runner.py` — Refactored model swapping to use `MODEL_ROUTING`, added `plan_only`/`reuse_plan`/`prior_phase_outputs` params, `files_written` WebSocket message
+- `src/agent_team/server/app.py` — Passes `plan_only`, `reuse_plan`, `phase_outputs` from WebSocket to `AgentTeam`
+- `src/agent_team/cli/interactive.py` — `stream_conversation()` returns phase outputs, path auto-detection, scan security, model routing for chat/ask, `files_written` display
+
+---
+
 ## v3.1.0 — Accuracy Optimization Round 4 (2026-03-22)
 
 ### Summary

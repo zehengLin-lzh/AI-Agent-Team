@@ -4,31 +4,41 @@ import json
 import re
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, THINKING_MODEL
+from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING
 from agent_team.agents.definitions import (
     AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, MODE_TEMPERATURES,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
 from agent_team.agents.context import build_context_for_agent
-from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model
+from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model, set_active_model
 from agent_team.files.writer import extract_and_write_files, extract_run_commands, _resolve_base_dir
 from agent_team.files.scaffolder import scaffold_plan_paths
 from agent_team.plans.storage import save_plan_markdown
 
 
 class AgentTeam:
-    def __init__(self, ws: WebSocket, execution_path: str | None = None):
+    def __init__(
+        self,
+        ws: WebSocket,
+        execution_path: str | None = None,
+        plan_only: bool = False,
+        reuse_plan: bool = False,
+        prior_phase_outputs: dict[str, str] | None = None,
+    ):
         self.ws = ws
         self.execution_path = execution_path
+        self.plan_only = plan_only
+        self.reuse_plan = reuse_plan
+        self.prior_phase_outputs = prior_phase_outputs or {}
         self.phase_outputs: dict[str, str] = {}
         self.fix_loop_count = 0
         self.original_plan = ""
         self.mode = AgentMode.CODING
         self.memory_context = ""
         self.session_context = ""
-        self.mcp_tools_prompt = ""  # MCP tool descriptions to inject into prompts
-        self.mcp_registry = None    # MCPRegistry reference for tool execution
+        self.mcp_tools_prompt = ""
+        self.mcp_registry = None
         self.token_tracker = SessionTokenTracker()
 
     async def send_status(self, message: str, phase: str = ""):
@@ -37,6 +47,28 @@ class AgentTeam:
             "message": message,
             "phase": phase,
         })
+
+    def _swap_model_for_agent(self, agent_name: str) -> tuple[str | None, bool]:
+        """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
+        routed_model = MODEL_ROUTING.get(agent_name)
+        if not routed_model:
+            return None, False
+        try:
+            original = get_active_model()
+            if routed_model != original:
+                set_active_model(routed_model)
+                return original, True
+        except Exception:
+            pass
+        return None, False
+
+    def _restore_model(self, original_model: str | None, did_swap: bool):
+        """Restore the original model after agent run."""
+        if did_swap and original_model:
+            try:
+                set_active_model(original_model)
+            except Exception:
+                pass
 
     async def run_agent(self, agent_name: str) -> str:
         """Run a single agent and store its output."""
@@ -56,16 +88,8 @@ class AgentTeam:
             "content": f"Please proceed as {agent_name}.",
         })
 
-        # Use thinking model for analysis agents (THINKER, PLANNER, REVIEWER)
-        use_thinking_model = agent_name in ("THINKER", "PLANNER", "REVIEWER") and THINKING_MODEL
-        original_model = None
-        if use_thinking_model:
-            try:
-                original_model = get_active_model()
-                from agent_team.llm import set_active_model
-                set_active_model(THINKING_MODEL)
-            except Exception:
-                use_thinking_model = False
+        # Model routing: swap to the configured model for this agent role
+        original_model, did_swap = self._swap_model_for_agent(agent_name)
 
         try:
             output = await stream_llm(
@@ -78,10 +102,7 @@ class AgentTeam:
                 token_tracker=self.token_tracker,
             )
         finally:
-            # Restore original model if we swapped it
-            if use_thinking_model and original_model:
-                from agent_team.llm import set_active_model
-                set_active_model(original_model)
+            self._restore_model(original_model, did_swap)
 
         # Execute any MCP tool calls found in the output
         if self.mcp_registry and "TOOL_CALL:" in output:
@@ -159,15 +180,8 @@ class AgentTeam:
         if not thinker_output:
             return
 
-        # Use thinking model for debate if available
-        original_model = None
-        if THINKING_MODEL:
-            try:
-                original_model = get_active_model()
-                from agent_team.llm import set_active_model
-                set_active_model(THINKING_MODEL)
-            except Exception:
-                pass
+        # Model routing for debate agents
+        original_model, did_swap = self._swap_model_for_agent("CHALLENGER")
 
         try:
             # Run challenger
@@ -194,10 +208,15 @@ class AgentTeam:
                 "agent": "CHALLENGER",
                 "content": challenger_output[:2000],
             })
+        finally:
+            self._restore_model(original_model, did_swap)
 
-            # THINKER responds to challenges
-            await self.send_status("Phase 2c: Refining analysis based on debate...", "debate")
+        # THINKER responds to challenges
+        await self.send_status("Phase 2c: Refining analysis based on debate...", "debate")
 
+        original_model2, did_swap2 = self._swap_model_for_agent("THINKER_REFINED")
+
+        try:
             response_messages = [
                 {"role": "user", "content": self.original_plan},
                 {"role": "assistant", "content": thinker_output},
@@ -223,10 +242,7 @@ class AgentTeam:
                 "content": refined_output[:2000],
             })
         finally:
-            # Restore original model
-            if original_model:
-                from agent_team.llm import set_active_model
-                set_active_model(original_model)
+            self._restore_model(original_model2, did_swap2)
 
     async def run_planner(self):
         await self.send_status("Phase 3: Planning...", "plan")
@@ -273,6 +289,12 @@ class AgentTeam:
             )
             if written:
                 base = _resolve_base_dir(self.execution_path)
+                # A2: Send file paths for traceability
+                await self.ws.send_json({
+                    "type": "files_written",
+                    "files": [str(f) for f in written],
+                    "base_dir": str(base),
+                })
                 await self.send_status(f"Wrote {len(written)} file(s).", "execute")
 
         # Run commands if in execution mode
@@ -280,7 +302,6 @@ class AgentTeam:
             commands = extract_run_commands(executor_output)
             if commands:
                 await self.send_status("Running commands...", "execute")
-                # Import sandbox here to avoid circular imports
                 from agent_team.security.sandbox import SandboxExecutor
                 sandbox = SandboxExecutor(
                     workspace=_resolve_base_dir(self.execution_path)
@@ -324,7 +345,6 @@ class AgentTeam:
                     from agent_team.llm.registry import get_active_provider_name
                     provider = get_active_provider_name()
                     if provider in ("ollama", "huggingface"):
-                        # Local LLM — only include tools from stdio servers
                         from agent_team.mcp.config import MCPConfig
                         config = self.mcp_registry.config
                         remote_servers = [
@@ -355,7 +375,7 @@ class AgentTeam:
                         "results": [{"content": r.content, "score": r.score, "source": r.source} for r in results],
                     })
             except Exception:
-                pass  # Memory not available yet, that's fine
+                pass
 
             # Inject session context
             if self.session_context:
@@ -364,8 +384,17 @@ class AgentTeam:
                 else:
                     self.memory_context = self.session_context
 
-            # Run the mode-specific pipeline
-            phase_order = MODE_PHASE_ORDER.get(self.mode, MODE_PHASE_ORDER[AgentMode.CODING])
+            # A5: If reusing a prior plan, inject outputs and skip to EXECUTOR+REVIEWER
+            if self.reuse_plan and self.prior_phase_outputs:
+                self.phase_outputs.update(self.prior_phase_outputs)
+                phase_order = [["EXECUTOR"], ["REVIEWER"]]
+            else:
+                # Normal pipeline
+                phase_order = list(MODE_PHASE_ORDER.get(self.mode, MODE_PHASE_ORDER[AgentMode.CODING]))
+                # A1: Skip EXECUTOR when plan_only
+                if self.plan_only:
+                    phase_order = [g for g in phase_order if g != ["EXECUTOR"]]
+
             for phase_group in phase_order:
                 if len(phase_group) == 1:
                     agent = phase_group[0]
@@ -406,12 +435,13 @@ class AgentTeam:
                     phase_outputs=self.phase_outputs,
                 )
             except Exception:
-                pass  # Learning not critical
+                pass
 
             await self.ws.send_json({
                 "type": "complete",
                 "model": get_active_model(),
                 "token_summary": self.token_tracker.summary(),
+                "execution_path": self.execution_path,
             })
 
         except WebSocketDisconnect:

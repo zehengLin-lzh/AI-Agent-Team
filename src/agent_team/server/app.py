@@ -37,7 +37,13 @@ async def websocket_endpoint(websocket: WebSocket):
         raw = await websocket.receive_text()
         data = json.loads(raw)
         if data.get("type") == "start":
-            team = AgentTeam(websocket, execution_path=data.get("execution_path"))
+            team = AgentTeam(
+                websocket,
+                execution_path=data.get("execution_path"),
+                plan_only=data.get("plan_only", False),
+                reuse_plan=data.get("reuse_plan", False),
+                prior_phase_outputs=data.get("phase_outputs"),
+            )
 
             # Inject session context if provided
             session_ctx = data.get("session_context", "")
