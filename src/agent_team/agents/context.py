@@ -31,17 +31,21 @@ def build_context_for_agent(
     messages.append({"role": "user", "content": original_plan})
     token_count += plan_tokens
 
-    # Priority 2: Memory context (capped at 30% of budget)
+    # Priority 2: Memory/session context (capped at 35% of budget)
     if memory_context:
         mem_tokens = estimate_tokens(memory_context)
-        max_mem = int(max_tokens * 0.3)
+        max_mem = int(max_tokens * 0.35)
         if mem_tokens > max_mem:
             memory_context = truncate_to_tokens(memory_context, max_mem)
             mem_tokens = max_mem
         if token_count + mem_tokens < max_tokens:
+            # Label scan context prominently so agents reference it
+            label = "IMPORTANT CONTEXT — reference specific files, functions, and patterns below:"
+            if "## Repository Context" in memory_context or "## Directory Structure" in memory_context:
+                label = "REPOSITORY SCAN RESULTS — you MUST reference specific files and code from this context in your analysis:"
             messages.append({
                 "role": "system",
-                "content": f"Relevant knowledge from past sessions:\n{memory_context}",
+                "content": f"{label}\n{memory_context}",
             })
             token_count += mem_tokens
 

@@ -56,8 +56,8 @@ class AgentTeam:
             "content": f"Please proceed as {agent_name}.",
         })
 
-        # Use thinking model for analysis agents (THINKER, REVIEWER)
-        use_thinking_model = agent_name in ("THINKER",) and THINKING_MODEL
+        # Use thinking model for analysis agents (THINKER, PLANNER, REVIEWER)
+        use_thinking_model = agent_name in ("THINKER", "PLANNER", "REVIEWER") and THINKING_MODEL
         original_model = None
         if use_thinking_model:
             try:
