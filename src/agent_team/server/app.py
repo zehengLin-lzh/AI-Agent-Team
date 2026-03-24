@@ -114,6 +114,9 @@ async def ask(request: AskRequest):
         execution_path=execution_path, mode=agent_mode.value,
     )
 
+    # Extract file_changes from phase_outputs (stored by run_team_http as list[dict])
+    file_changes = phase_outputs.pop("_file_changes", None)  # type: ignore[arg-type]
+
     return AskResponse(
         title=title,
         timestamp=datetime.now().isoformat(timespec="seconds"),
@@ -122,6 +125,7 @@ async def ask(request: AskRequest):
         execution_path=execution_path,
         plan_file_path=str(plan_path),
         phase_outputs=phase_outputs,
+        file_changes=file_changes,
     )
 
 

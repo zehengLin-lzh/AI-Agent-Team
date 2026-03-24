@@ -294,7 +294,13 @@ class AgentTeam:
             changes = extract_and_write_files(
                 executor_output, execution_path=self.execution_path,
                 skip_existing=skip_existing,
+                planner_output=self.phase_outputs.get("PLANNER", ""),
             )
+            if not changes:
+                await self.send_status(
+                    "Warning: EXECUTOR output did not contain recognizable file blocks.",
+                    "execute",
+                )
             if changes:
                 base = _resolve_base_dir(self.execution_path)
                 # Send rich file change data with diffs for color-coded display

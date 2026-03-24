@@ -219,7 +219,11 @@ async def run_team_http(
 
             # Handle file writing after EXECUTOR
             if agent == "EXECUTOR" and mode != AskMode.PLAN_ONLY:
-                changes = extract_and_write_files(output, execution_path=execution_path)
+                planner_out = phase_outputs.get("PLANNER", "")
+                changes = extract_and_write_files(
+                    output, execution_path=execution_path,
+                    planner_output=planner_out,
+                )
                 if changes:
                     file_changes_data = [
                         {
@@ -245,7 +249,10 @@ async def run_team_http(
                         complexity=complexity.value, patterns_context=patterns_context,
                     )
                     if mode != AskMode.PLAN_ONLY:
-                        changes = extract_and_write_files(exec_output, execution_path=execution_path)
+                        changes = extract_and_write_files(
+                            exec_output, execution_path=execution_path,
+                            planner_output=planner_out,
+                        )
                         if changes:
                             file_changes_data = [
                                 {"path": str(c.path), "is_new": c.is_new, "diff": c.diff, "preview": c.preview}
@@ -305,6 +312,6 @@ async def run_team_http(
 
     # Attach file changes to outputs for API consumers
     if file_changes_data:
-        phase_outputs["_file_changes"] = str(file_changes_data)
+        phase_outputs["_file_changes"] = file_changes_data  # type: ignore[assignment]
 
     return phase_outputs
