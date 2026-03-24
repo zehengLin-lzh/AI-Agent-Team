@@ -30,6 +30,8 @@ app.add_middleware(
 )
 
 
+# NOTE: Launch uvicorn with generous WebSocket keepalive to support user-input waits:
+#   uvicorn ... --ws-ping-interval 30 --ws-ping-timeout 300
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()

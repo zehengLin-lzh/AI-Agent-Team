@@ -537,7 +537,12 @@ async def stream_conversation(
     collected_outputs: dict[str, str] = {}
 
     try:
-        async with ws_connect(ws_url(), max_size=10 * 1024 * 1024) as ws:
+        async with ws_connect(
+            ws_url(),
+            max_size=10 * 1024 * 1024,
+            ping_interval=30,    # Send ping every 30s
+            ping_timeout=300,    # Allow 5 min for pong (user may be typing)
+        ) as ws:
             start_msg: dict = {
                 "type": "start",
                 "content": full_plan,
@@ -641,8 +646,9 @@ async def stream_conversation(
                         title="[bold]\u2753 Agent needs your input[/]",
                         border_style="yellow",
                     ))
-                    # Use simple input here since we're in async context
-                    user_reply = input("\n  Your answer: ").strip()
+                    # Run input() in a thread so the event loop stays alive
+                    # for WebSocket ping/pong (prevents keepalive timeout)
+                    user_reply = (await asyncio.to_thread(input, "\n  Your answer: ")).strip()
                     await ws.send(json.dumps({"content": user_reply}))
 
                 elif t == "complete":
