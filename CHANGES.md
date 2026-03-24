@@ -2,6 +2,46 @@
 
 ---
 
+## v5.0.0 — Smart Complexity, Color Diffs, Error Learning (2026-03-24)
+
+### Summary
+
+Three new features to improve small-model accuracy, developer UX, and autonomous learning.
+
+### Feature 1: Task Complexity Routing
+- **Heuristic classifier** (`complexity.py`) — instant classification into simple/medium/complex based on word count, keywords, file refs, and component mentions
+- **Simple tasks** skip THINKER + debate → straight ORCHESTRATOR → PLANNER → EXECUTOR → REVIEWER
+- **Simplified prompts** for ORCHESTRATOR and PLANNER on simple tasks — shorter, more direct
+- **SIMPLE_MODEL_ROUTING** — all agents use FAST_MODEL (7b) for simple tasks; saves time and avoids over-thinking
+
+### Feature 2: Color-Coded File Changes
+- **Diff computation** in `writer.py` — before overwriting, reads original and computes `difflib.unified_diff`
+- **New files** → green panel with syntax-highlighted preview (first 30 lines)
+- **Modified files** → yellow panel with colored unified diff (+green/-red)
+- **`file_changes` WebSocket message** replaces `files_written` — includes `is_new`, `diff`, `preview`
+- Rich `Syntax` component with "diff" lexer for native coloring; truncated at 50 lines
+
+### Feature 3: Autonomous Error Learning
+- **`extract_error_patterns()`** — called after fix loops, uses LLM to extract specific mistake→fix→prevention patterns
+- **Stored as `learned_patterns`** with confidence=0.7 (verified fixes get higher confidence)
+- **Pattern injection** — before each pipeline run, high-confidence patterns are queried and injected into agent context as "Lessons from Past Sessions"
+- **Confidence boost/decay** — patterns that prevent fix loops get +0.05 confidence; patterns that don't help get -0.05
+- **Enhanced `SUMMARY_PROMPT`** — post-session extraction now specifically targets error patterns
+
+### Files Modified
+- `agents/complexity.py` — **NEW**: task complexity classifier
+- `agents/definitions.py` — SIMPLE_PHASE_ORDER, SIMPLE_PROMPTS, get_agent_prompt complexity param
+- `config.py` — SIMPLE_MODEL_ROUTING
+- `agents/runner.py` — complexity routing, file_changes WS, pattern injection/boosting, error extraction trigger
+- `agents/http_runner.py` — same changes for HTTP pipeline
+- `files/writer.py` — FileChangeInfo dataclass, diff computation
+- `cli/interactive.py` — color-coded diff rendering with Rich Syntax
+- `learning/extractor.py` — extract_error_patterns(), enhanced SUMMARY_PROMPT
+- `memory/database.py` — get_relevant_patterns() method
+- `agents/context.py` — build_pattern_context(), patterns_context in build_context_for_agent()
+
+---
+
 ## v4.0.0 — Pipeline Fixes, Model Routing, Security & Accuracy (2026-03-23)
 
 ### Summary

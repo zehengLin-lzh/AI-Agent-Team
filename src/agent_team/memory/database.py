@@ -202,6 +202,29 @@ class MemoryDB:
         row = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return row[0] if row else 0
 
+    def get_relevant_patterns(
+        self,
+        min_confidence: float = 0.4,
+        limit: int = 10,
+        category: str | None = None,
+    ) -> list[dict]:
+        """Get high-confidence learned patterns for injection into agent context."""
+        if category:
+            rows = self.conn.execute(
+                "SELECT id, category, description, confidence, times_applied "
+                "FROM learned_patterns WHERE category = ? AND confidence >= ? "
+                "ORDER BY confidence DESC, times_applied DESC LIMIT ?",
+                (category, min_confidence, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT id, category, description, confidence, times_applied "
+                "FROM learned_patterns WHERE confidence >= ? "
+                "ORDER BY confidence DESC, times_applied DESC LIMIT ?",
+                (min_confidence, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def boost_pattern_confidence(self, pattern_id: str, delta: float = 0.1):
         self.conn.execute(
             "UPDATE learned_patterns SET confidence = MIN(1.0, confidence + ?), times_applied = times_applied + 1 WHERE id = ?",

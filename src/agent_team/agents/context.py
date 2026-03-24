@@ -15,11 +15,26 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:max_chars] + "\n... [truncated]"
 
 
+def build_pattern_context(patterns: list[dict], max_tokens: int = 1500) -> str:
+    """Format learned patterns for injection into agent prompts."""
+    if not patterns:
+        return ""
+    lines = ["## Lessons from Past Sessions (avoid these known mistakes):"]
+    for p in patterns:
+        conf = p.get("confidence", 0.5)
+        desc = p.get("description", "")
+        cat = p.get("category", "unknown")
+        lines.append(f"- [{cat}] ({conf:.0%} confidence) {desc}")
+    text = "\n".join(lines)
+    return truncate_to_tokens(text, max_tokens)
+
+
 def build_context_for_agent(
     agent_name: str,
     phase_outputs: dict[str, str],
     original_plan: str,
     memory_context: str = "",
+    patterns_context: str = "",
     max_tokens: int = 24000,
 ) -> list[dict]:
     """Build the message history an agent should see, with token budgeting."""
@@ -48,6 +63,20 @@ def build_context_for_agent(
                 "content": f"{label}\n{memory_context}",
             })
             token_count += mem_tokens
+
+    # Priority 2.5: Learned patterns (capped at ~6% of budget)
+    if patterns_context:
+        pat_tokens = estimate_tokens(patterns_context)
+        max_pat = int(max_tokens * 0.06)
+        if pat_tokens > max_pat:
+            patterns_context = truncate_to_tokens(patterns_context, max_pat)
+            pat_tokens = max_pat
+        if token_count + pat_tokens < max_tokens:
+            messages.append({
+                "role": "system",
+                "content": patterns_context,
+            })
+            token_count += pat_tokens
 
     # Priority 3: Prior agent outputs (most recent first, truncate if needed)
     for prior_agent in CONTEXT_AGENTS.get(agent_name, []):

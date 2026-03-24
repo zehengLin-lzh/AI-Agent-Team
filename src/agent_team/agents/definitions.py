@@ -79,6 +79,77 @@ MODE_PHASE_ORDER: dict[AgentMode, list[list[str]]] = {
 }
 
 
+# Simplified phase order for simple tasks — skips THINKER and debate
+SIMPLE_PHASE_ORDER: dict[AgentMode, list[list[str]]] = {
+    AgentMode.THINKING: [
+        ["ORCHESTRATOR"],
+        ["PLANNER"],
+        ["REVIEWER"],
+    ],
+    AgentMode.CODING: [
+        ["ORCHESTRATOR"],
+        ["PLANNER"],
+        ["EXECUTOR"],
+        ["REVIEWER"],
+    ],
+    AgentMode.BRAINSTORMING: [
+        ["ORCHESTRATOR"],
+        ["PLANNER"],
+        ["REVIEWER"],
+    ],
+    AgentMode.ARCHITECTURE: [
+        ["ORCHESTRATOR"],
+        ["PLANNER"],
+        ["REVIEWER"],
+    ],
+    AgentMode.EXECUTION: [
+        ["ORCHESTRATOR"],
+        ["PLANNER"],
+        ["EXECUTOR"],
+        ["REVIEWER"],
+    ],
+}
+
+
+# -- Simplified prompts for simple tasks --------------------------------------
+
+_SIMPLE_ORCHESTRATOR = """You are ORCHESTRATOR for a simple, focused task.
+
+Read the request and restate it concisely. This is a small task — keep your brief short and direct.
+
+Output format:
+[ORCHESTRATOR]
+Understanding: <1-sentence summary>
+Mode: {mode}
+
+Tasks:
+1. <the single main task>
+
+-> Routing to: PLANNER
+"""
+
+_SIMPLE_PLANNER = """You are PLANNER for a simple, focused task.
+
+Create a direct, minimal plan. Do not over-decompose — this is a simple task.
+- Reference specific files and paths from context
+- Give EXECUTOR clear, actionable steps
+- Keep it to 3-5 steps maximum
+
+{mode_instructions}
+
+Output format:
+[PLANNER]
+{plan_format}
+
+-> Routing to: {next_agent}
+"""
+
+SIMPLE_PROMPTS: dict[str, str] = {
+    "ORCHESTRATOR": _SIMPLE_ORCHESTRATOR,
+    "PLANNER": _SIMPLE_PLANNER,
+}
+
+
 # -- Base system prompts per role ----------------------------------------------
 
 _ORCHESTRATOR_BASE = """You are ORCHESTRATOR -- the team lead of an AI agent team.
@@ -811,8 +882,16 @@ Confidence: <percentage>%
 """
 
 
-def get_agent_prompt(role: str, mode: AgentMode) -> str:
-    """Get the system prompt for an agent role in a specific mode."""
+def get_agent_prompt(role: str, mode: AgentMode, complexity: str = "medium") -> str:
+    """Get the system prompt for an agent role in a specific mode.
+
+    When complexity is 'simple', returns a shorter, more direct prompt for
+    roles that have simplified variants (ORCHESTRATOR, PLANNER).
+    """
+    # For simple tasks, check for simplified prompt first
+    if complexity == "simple" and role in SIMPLE_PROMPTS:
+        return SIMPLE_PROMPTS[role]
+
     prompt_maps = {
         "ORCHESTRATOR": ORCHESTRATOR_PROMPTS,
         "THINKER": THINKER_PROMPTS,

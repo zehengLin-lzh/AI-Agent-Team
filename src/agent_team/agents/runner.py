@@ -4,13 +4,14 @@ import json
 import re
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING
+from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING, SIMPLE_MODEL_ROUTING
 from agent_team.agents.definitions import (
-    AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, MODE_TEMPERATURES,
+    AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
-from agent_team.agents.context import build_context_for_agent
+from agent_team.agents.context import build_context_for_agent, build_pattern_context
+from agent_team.agents.complexity import TaskComplexity, classify_complexity
 from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model, set_active_model
 from agent_team.files.writer import extract_and_write_files, extract_run_commands, _resolve_base_dir
 from agent_team.files.scaffolder import scaffold_plan_paths
@@ -35,7 +36,10 @@ class AgentTeam:
         self.fix_loop_count = 0
         self.original_plan = ""
         self.mode = AgentMode.CODING
+        self.complexity = TaskComplexity.MEDIUM
         self.memory_context = ""
+        self.patterns_context = ""
+        self.injected_pattern_ids: list[str] = []
         self.session_context = ""
         self.mcp_tools_prompt = ""
         self.mcp_registry = None
@@ -50,7 +54,10 @@ class AgentTeam:
 
     def _swap_model_for_agent(self, agent_name: str) -> tuple[str | None, bool]:
         """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
-        routed_model = MODEL_ROUTING.get(agent_name)
+        if self.complexity == TaskComplexity.SIMPLE:
+            routed_model = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        else:
+            routed_model = MODEL_ROUTING.get(agent_name)
         if not routed_model:
             return None, False
         try:
@@ -72,7 +79,7 @@ class AgentTeam:
 
     async def run_agent(self, agent_name: str) -> str:
         """Run a single agent and store its output."""
-        system_prompt = get_agent_prompt(agent_name, self.mode)
+        system_prompt = get_agent_prompt(agent_name, self.mode, complexity=self.complexity.value)
 
         # Inject MCP tool descriptions into system prompt for agents that can use them
         if self.mcp_tools_prompt and agent_name in ("THINKER", "PLANNER", "EXECUTOR"):
@@ -82,6 +89,7 @@ class AgentTeam:
         messages = build_context_for_agent(
             agent_name, self.phase_outputs, self.original_plan,
             memory_context=self.memory_context,
+            patterns_context=self.patterns_context,
         )
         messages.append({
             "role": "user",
@@ -283,19 +291,27 @@ class AgentTeam:
 
         # Write files if in coding/execution mode
         if self.mode in (AgentMode.CODING, AgentMode.EXECUTION):
-            written = extract_and_write_files(
+            changes = extract_and_write_files(
                 executor_output, execution_path=self.execution_path,
                 skip_existing=skip_existing,
             )
-            if written:
+            if changes:
                 base = _resolve_base_dir(self.execution_path)
-                # A2: Send file paths for traceability
+                # Send rich file change data with diffs for color-coded display
                 await self.ws.send_json({
-                    "type": "files_written",
-                    "files": [str(f) for f in written],
+                    "type": "file_changes",
+                    "files": [
+                        {
+                            "path": str(c.path),
+                            "is_new": c.is_new,
+                            "diff": c.diff,
+                            "preview": c.preview,
+                        }
+                        for c in changes
+                    ],
                     "base_dir": str(base),
                 })
-                await self.send_status(f"Wrote {len(written)} file(s).", "execute")
+                await self.send_status(f"Wrote {len(changes)} file(s).", "execute")
 
         # Run commands if in execution mode
         if self.mode == AgentMode.EXECUTION:
@@ -325,9 +341,25 @@ class AgentTeam:
                 await self.send_status(
                     f"Fixes needed -- loop {self.fix_loop_count}/{MAX_FIX_LOOPS}...", "verify"
                 )
+                # Capture original output for error learning
+                original_executor = self.phase_outputs.get("EXECUTOR", "")
+
                 fix_context = "FIXES NEEDED:\n" + "\n".join(f"- {f}" for f in fixes)
-                self.phase_outputs["EXECUTOR"] = self.phase_outputs.get("EXECUTOR", "") + f"\n\n{fix_context}"
+                self.phase_outputs["EXECUTOR"] = original_executor + f"\n\n{fix_context}"
                 await self.run_executor()
+
+                # Extract error patterns from this fix loop (best-effort)
+                try:
+                    from agent_team.learning.extractor import extract_error_patterns
+                    await extract_error_patterns(
+                        reviewer_output=reviewer_output,
+                        executor_original=original_executor,
+                        executor_fixed=self.phase_outputs.get("EXECUTOR", ""),
+                        user_plan=self.original_plan,
+                    )
+                except Exception:
+                    pass
+
                 await self.run_reviewer()  # Re-review
 
     async def run(self, user_plan: str, mode: str = "coding"):
@@ -361,6 +393,12 @@ class AgentTeam:
                 except Exception:
                     pass
 
+            # Classify task complexity for adaptive routing
+            self.complexity = classify_complexity(user_plan, self.mode.value)
+            await self.send_status(
+                f"Task classified as: {self.complexity.value}", "setup"
+            )
+
             # Pre-session: query memory for relevant context
             try:
                 from agent_team.memory.search import HybridSearch
@@ -377,6 +415,18 @@ class AgentTeam:
             except Exception:
                 pass
 
+            # Pre-session: query learned patterns for injection
+            try:
+                from agent_team.memory.database import MemoryDB
+                _db = MemoryDB()
+                patterns = _db.get_relevant_patterns(min_confidence=0.4, limit=10)
+                if patterns:
+                    self.patterns_context = build_pattern_context(patterns)
+                    self.injected_pattern_ids = [p["id"] for p in patterns]
+                _db.close()
+            except Exception:
+                pass
+
             # Inject session context
             if self.session_context:
                 if self.memory_context:
@@ -389,8 +439,15 @@ class AgentTeam:
                 self.phase_outputs.update(self.prior_phase_outputs)
                 phase_order = [["EXECUTOR"], ["REVIEWER"]]
             else:
-                # Normal pipeline
-                phase_order = list(MODE_PHASE_ORDER.get(self.mode, MODE_PHASE_ORDER[AgentMode.CODING]))
+                # Select phase order based on complexity
+                if self.complexity == TaskComplexity.SIMPLE:
+                    phase_order = list(SIMPLE_PHASE_ORDER.get(
+                        self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
+                    ))
+                else:
+                    phase_order = list(MODE_PHASE_ORDER.get(
+                        self.mode, MODE_PHASE_ORDER[AgentMode.CODING]
+                    ))
                 # A1: Skip EXECUTOR when plan_only
                 if self.plan_only:
                     phase_order = [g for g in phase_order if g != ["EXECUTOR"]]
@@ -407,8 +464,8 @@ class AgentTeam:
                     }.get(agent)
                     if handler:
                         await handler()
-                    # Run debate after THINKER for better accuracy
-                    if agent == "THINKER":
+                    # Run debate after THINKER (skip for simple tasks)
+                    if agent == "THINKER" and self.complexity != TaskComplexity.SIMPLE:
                         await self.run_debate()
                 else:
                     # Parallel execution
@@ -425,6 +482,19 @@ class AgentTeam:
                             tasks.append(handler())
                     if tasks:
                         await asyncio.gather(*tasks)
+
+            # Post-session: boost/decay injected patterns based on outcome
+            try:
+                if self.injected_pattern_ids:
+                    from agent_team.memory.database import MemoryDB
+                    _db = MemoryDB()
+                    had_fixes = self.fix_loop_count > 0
+                    delta = 0.05 if not had_fixes else -0.05
+                    for pid in self.injected_pattern_ids:
+                        _db.boost_pattern_confidence(pid, delta)
+                    _db.close()
+            except Exception:
+                pass
 
             # Post-session: trigger learning
             try:

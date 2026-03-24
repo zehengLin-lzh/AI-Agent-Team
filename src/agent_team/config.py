@@ -30,6 +30,14 @@ MODEL_ROUTING: dict[str, str | None] = {
 SENSITIVE_FILE_PATTERNS = [".env", "credentials", "secret", "service_account", "private_key"]
 SENSITIVE_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]
 SENSITIVE_CONTENT_RE = r"(?i)(api[_-]?key|secret[_-]?key|password|token|auth[_-]?token|private[_-]?key)\s*[=:]\s*\S+"
+# ── Simple-task model routing (all agents use fast model) ──────────────────
+SIMPLE_MODEL_ROUTING: dict[str, str] = {
+    "ORCHESTRATOR": FAST_MODEL,
+    "PLANNER": FAST_MODEL,
+    "EXECUTOR": FAST_MODEL,
+    "REVIEWER": FAST_MODEL,
+}
+
 MAX_FIX_LOOPS = 3
 PLAN_DIR_ENV = "AGENT_TEAM_PLAN_DIR"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # src/agent_team/ → repo root

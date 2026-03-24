@@ -36,6 +36,7 @@ from rich.theme import Theme
 from rich.columns import Columns
 from rich.rule import Rule
 from rich.spinner import Spinner
+from rich.syntax import Syntax
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError
 
@@ -446,6 +447,72 @@ def render_phase_header(phase: str, label: str):
     ))
 
 
+_EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript", ".jsx": "jsx",
+    ".tsx": "tsx", ".java": "java", ".go": "go", ".rs": "rust", ".rb": "ruby",
+    ".html": "html", ".css": "css", ".json": "json", ".yaml": "yaml",
+    ".yml": "yaml", ".toml": "toml", ".sql": "sql", ".sh": "bash",
+    ".md": "markdown", ".xml": "xml",
+}
+_MAX_DIFF_DISPLAY = 50
+
+
+def _render_file_changes(console: Console, file_list, base: str):
+    """Render color-coded file changes — green for new, yellow+diff for modified."""
+    for f_info in file_list:
+        # Support both old format (plain string) and new format (dict with diff)
+        if isinstance(f_info, str):
+            console.print(f"  [green]\u25b8[/] {f_info}")
+            continue
+
+        path = f_info.get("path", "")
+        is_new = f_info.get("is_new", True)
+        diff = f_info.get("diff")
+        preview = f_info.get("preview")
+        rel_path = path.replace(base + "/", "") if base and path.startswith(base) else path
+
+        if is_new:
+            # New file: green panel with preview
+            if preview:
+                ext = Path(path).suffix.lower()
+                lang = _EXT_TO_LANG.get(ext, "text")
+                try:
+                    content_widget = Syntax(preview, lang, theme="monokai", line_numbers=True)
+                except Exception:
+                    content_widget = Text(preview, style="green")
+            else:
+                content_widget = Text(f"  {path}", style="green")
+            console.print(Panel(
+                content_widget,
+                title=f"[bold green]NEW: {rel_path}[/]",
+                border_style="green",
+            ))
+        else:
+            # Modified file: yellow panel with diff
+            if diff:
+                diff_lines = diff.splitlines()
+                truncated = False
+                if len(diff_lines) > _MAX_DIFF_DISPLAY:
+                    extra = len(diff_lines) - _MAX_DIFF_DISPLAY
+                    diff_lines = diff_lines[:_MAX_DIFF_DISPLAY]
+                    truncated = True
+                display_diff = "\n".join(diff_lines)
+                if truncated:
+                    display_diff += f"\n... +{extra} more lines"
+                try:
+                    content_widget = Syntax(display_diff, "diff", theme="monokai")
+                except Exception:
+                    content_widget = Text(display_diff)
+                console.print(Panel(
+                    content_widget,
+                    title=f"[bold yellow]MODIFIED: {rel_path}[/]",
+                    border_style="yellow",
+                ))
+            else:
+                # No diff available (identical content or read error)
+                console.print(f"  [yellow]\u25b8[/] {rel_path} [dim](modified, no changes detected)[/]")
+
+
 # ── Streaming Handler ────────────────────────────────────────────────────────
 
 async def stream_conversation(
@@ -555,16 +622,11 @@ async def stream_conversation(
                     state.session.add_agent_output(agent, content)
                     collected_outputs[agent] = content
 
-                elif t == "files_written":
-                    files = msg.get("files", [])
+                elif t in ("file_changes", "files_written"):
+                    file_list = msg.get("files", [])
                     base = msg.get("base_dir", "")
-                    if files:
-                        lines = [f"  [green]\u25b8[/] {f}" for f in files]
-                        console.print(Panel(
-                            "\n".join(lines),
-                            title=f"[bold]\U0001f4c1 Files Written[/] [dim]({base})[/]",
-                            border_style="green",
-                        ))
+                    if file_list:
+                        _render_file_changes(console, file_list, base)
 
                 elif t == "learning_complete":
                     patterns = msg.get("patterns_extracted", 0)

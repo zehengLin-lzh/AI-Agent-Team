@@ -4,13 +4,14 @@ import re
 from enum import Enum
 from pydantic import BaseModel
 
-from agent_team.config import MODEL_ROUTING, MAX_FIX_LOOPS
+from agent_team.config import MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MAX_FIX_LOOPS
 from agent_team.agents.definitions import (
-    AgentMode, MODE_PHASE_ORDER, MODE_TEMPERATURES,
+    AgentMode, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
-from agent_team.agents.context import build_context_for_agent
+from agent_team.agents.context import build_context_for_agent, build_pattern_context
+from agent_team.agents.complexity import TaskComplexity, classify_complexity
 from agent_team.llm import call_llm, get_active_model, set_active_model
 from agent_team.files.writer import extract_and_write_files
 from agent_team.files.scaffolder import scaffold_plan_paths
@@ -36,11 +37,15 @@ class AskResponse(BaseModel):
     execution_path: str | None
     plan_file_path: str
     phase_outputs: dict[str, str]
+    file_changes: list[dict] | None = None  # Rich file change data with diffs
 
 
-def _swap_model(agent_name: str) -> tuple[str | None, bool]:
+def _swap_model(agent_name: str, complexity: str = "medium") -> tuple[str | None, bool]:
     """Swap to routed model. Returns (original, did_swap)."""
-    routed = MODEL_ROUTING.get(agent_name)
+    if complexity == "simple":
+        routed = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+    else:
+        routed = MODEL_ROUTING.get(agent_name)
     if not routed:
         return None, False
     try:
@@ -66,11 +71,14 @@ async def _run_agent_http(
     original_plan: str,
     phase_outputs: dict[str, str],
     agent_mode: AgentMode = AgentMode.CODING,
+    complexity: str = "medium",
+    patterns_context: str = "",
 ) -> str:
-    system_prompt = get_agent_prompt(agent_name, agent_mode)
+    system_prompt = get_agent_prompt(agent_name, agent_mode, complexity=complexity)
     temperature = MODE_TEMPERATURES.get(agent_mode, 0.3)
     messages = build_context_for_agent(
         agent_name, phase_outputs, original_plan,
+        patterns_context=patterns_context,
     )
     messages.append({
         "role": "user",
@@ -78,7 +86,7 @@ async def _run_agent_http(
     })
 
     # Model routing
-    original_model, did_swap = _swap_model(agent_name)
+    original_model, did_swap = _swap_model(agent_name, complexity)
     try:
         content = await call_llm(
             system_prompt=system_prompt,
@@ -96,6 +104,7 @@ async def _run_debate_http(
     original_plan: str,
     phase_outputs: dict[str, str],
     agent_mode: AgentMode,
+    complexity: str = "medium",
 ):
     """Run challenger debate after THINKER."""
     thinker_output = phase_outputs.get("THINKER", "")
@@ -105,7 +114,7 @@ async def _run_debate_http(
     temperature = MODE_TEMPERATURES.get(agent_mode, 0.3)
 
     # CHALLENGER
-    original_model, did_swap = _swap_model("CHALLENGER")
+    original_model, did_swap = _swap_model("CHALLENGER", complexity)
     try:
         challenge_messages = [
             {"role": "user", "content": original_plan},
@@ -122,7 +131,7 @@ async def _run_debate_http(
         _restore_model(original_model, did_swap)
 
     # THINKER_REFINED
-    original_model2, did_swap2 = _swap_model("THINKER_REFINED")
+    original_model2, did_swap2 = _swap_model("THINKER_REFINED", complexity)
     try:
         response_messages = [
             {"role": "user", "content": original_plan},
@@ -143,7 +152,7 @@ def _needs_fix(output: str) -> list[str]:
     """Check reviewer output for fix markers."""
     fixes = []
     for marker in ("FIX_REQUIRED:", "REVISION_REQUIRED:"):
-        match = re.search(rf"{marker}\n(.*?)(?:\n→|\Z)", output, re.DOTALL)
+        match = re.search(rf"{marker}\n(.*?)(?:\n\u2192|\Z)", output, re.DOTALL)
         if match:
             for line in match.group(1).strip().split("\n"):
                 line = line.strip().lstrip("- ")
@@ -159,7 +168,32 @@ async def run_team_http(
     execution_path: str | None = None,
 ) -> dict[str, str]:
     phase_outputs: dict[str, str] = {}
-    phase_order = MODE_PHASE_ORDER.get(agent_mode, MODE_PHASE_ORDER[AgentMode.CODING])
+
+    # Classify complexity for adaptive routing
+    complexity = classify_complexity(user_plan, agent_mode.value)
+
+    # Query learned patterns for injection
+    patterns_context = ""
+    injected_ids: list[str] = []
+    try:
+        from agent_team.memory.database import MemoryDB
+        _db = MemoryDB()
+        patterns = _db.get_relevant_patterns(min_confidence=0.4, limit=10)
+        if patterns:
+            patterns_context = build_pattern_context(patterns)
+            injected_ids = [p["id"] for p in patterns]
+        _db.close()
+    except Exception:
+        pass
+
+    # Select phase order based on complexity
+    if complexity == TaskComplexity.SIMPLE:
+        phase_order = SIMPLE_PHASE_ORDER.get(agent_mode, SIMPLE_PHASE_ORDER[AgentMode.CODING])
+    else:
+        phase_order = MODE_PHASE_ORDER.get(agent_mode, MODE_PHASE_ORDER[AgentMode.CODING])
+
+    fix_count = 0
+    file_changes_data: list[dict] = []
 
     for phase_group in phase_order:
         if mode == AskMode.PLAN_ONLY and phase_group[0] in ("EXECUTOR",):
@@ -167,11 +201,17 @@ async def run_team_http(
 
         if len(phase_group) == 1:
             agent = phase_group[0]
-            output = await _run_agent_http(agent, user_plan, phase_outputs, agent_mode)
+            output = await _run_agent_http(
+                agent, user_plan, phase_outputs, agent_mode,
+                complexity=complexity.value, patterns_context=patterns_context,
+            )
 
-            # Run debate after THINKER
-            if agent == "THINKER":
-                await _run_debate_http(user_plan, phase_outputs, agent_mode)
+            # Run debate after THINKER (skip for simple tasks)
+            if agent == "THINKER" and complexity != TaskComplexity.SIMPLE:
+                await _run_debate_http(
+                    user_plan, phase_outputs, agent_mode,
+                    complexity=complexity.value,
+                )
 
             # Handle scaffolding after PLANNER
             if agent == "PLANNER":
@@ -179,26 +219,92 @@ async def run_team_http(
 
             # Handle file writing after EXECUTOR
             if agent == "EXECUTOR" and mode != AskMode.PLAN_ONLY:
-                extract_and_write_files(output, execution_path=execution_path)
+                changes = extract_and_write_files(output, execution_path=execution_path)
+                if changes:
+                    file_changes_data = [
+                        {
+                            "path": str(c.path),
+                            "is_new": c.is_new,
+                            "diff": c.diff,
+                            "preview": c.preview,
+                        }
+                        for c in changes
+                    ]
 
             # Fix loop after REVIEWER
             if agent == "REVIEWER" and agent_mode in (AgentMode.CODING, AgentMode.EXECUTION):
-                fix_count = 0
                 fixes = _needs_fix(output)
                 while fixes and fix_count < MAX_FIX_LOOPS:
                     fix_count += 1
+                    original_executor = phase_outputs.get("EXECUTOR", "")
                     fix_context = "FIXES NEEDED:\n" + "\n".join(f"- {f}" for f in fixes)
-                    phase_outputs["EXECUTOR"] = phase_outputs.get("EXECUTOR", "") + f"\n\n{fix_context}"
+                    phase_outputs["EXECUTOR"] = original_executor + f"\n\n{fix_context}"
                     # Re-run executor
-                    exec_output = await _run_agent_http("EXECUTOR", user_plan, phase_outputs, agent_mode)
+                    exec_output = await _run_agent_http(
+                        "EXECUTOR", user_plan, phase_outputs, agent_mode,
+                        complexity=complexity.value, patterns_context=patterns_context,
+                    )
                     if mode != AskMode.PLAN_ONLY:
-                        extract_and_write_files(exec_output, execution_path=execution_path)
+                        changes = extract_and_write_files(exec_output, execution_path=execution_path)
+                        if changes:
+                            file_changes_data = [
+                                {"path": str(c.path), "is_new": c.is_new, "diff": c.diff, "preview": c.preview}
+                                for c in changes
+                            ]
+                    # Extract error patterns from fix loop (best-effort)
+                    try:
+                        from agent_team.learning.extractor import extract_error_patterns
+                        await extract_error_patterns(
+                            reviewer_output=output,
+                            executor_original=original_executor,
+                            executor_fixed=phase_outputs.get("EXECUTOR", ""),
+                            user_plan=user_plan,
+                        )
+                    except Exception:
+                        pass
                     # Re-run reviewer
-                    output = await _run_agent_http("REVIEWER", user_plan, phase_outputs, agent_mode)
+                    output = await _run_agent_http(
+                        "REVIEWER", user_plan, phase_outputs, agent_mode,
+                        complexity=complexity.value, patterns_context=patterns_context,
+                    )
                     fixes = _needs_fix(output)
         else:
             await asyncio.gather(
-                *[_run_agent_http(a, user_plan, phase_outputs, agent_mode) for a in phase_group]
+                *[
+                    _run_agent_http(
+                        a, user_plan, phase_outputs, agent_mode,
+                        complexity=complexity.value, patterns_context=patterns_context,
+                    )
+                    for a in phase_group
+                ]
             )
+
+    # Boost/decay injected patterns based on outcome
+    try:
+        if injected_ids:
+            from agent_team.memory.database import MemoryDB
+            _db = MemoryDB()
+            had_fixes = fix_count > 0
+            delta = 0.05 if not had_fixes else -0.05
+            for pid in injected_ids:
+                _db.boost_pattern_confidence(pid, delta)
+            _db.close()
+    except Exception:
+        pass
+
+    # Post-session learning
+    try:
+        from agent_team.learning.extractor import extract_session_knowledge
+        await extract_session_knowledge(
+            user_plan=user_plan,
+            mode=agent_mode.value,
+            phase_outputs=phase_outputs,
+        )
+    except Exception:
+        pass
+
+    # Attach file changes to outputs for API consumers
+    if file_changes_data:
+        phase_outputs["_file_changes"] = str(file_changes_data)
 
     return phase_outputs
