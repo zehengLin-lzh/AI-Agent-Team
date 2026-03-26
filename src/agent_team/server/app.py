@@ -21,7 +21,7 @@ from agent_team.agents.http_runner import (
 from agent_team.agents.definitions import AgentMode
 from agent_team.plans.storage import save_plan_markdown
 
-app = FastAPI(title="Mat Agent Team v2")
+app = FastAPI(title="Mat Agent Team v6")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
