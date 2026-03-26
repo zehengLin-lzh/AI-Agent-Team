@@ -458,8 +458,8 @@ class AgentTeam:
         save_plan_markdown(title=title, plan_text=output,
                           execution_path=self.execution_path, mode=self.mode.value)
 
-        # Scaffold paths (only in coding/execution modes)
-        if self.mode in (AgentMode.CODING, AgentMode.EXECUTION):
+        # Scaffold paths (only in coding/execution modes, skip during plan_only)
+        if self.mode in (AgentMode.CODING, AgentMode.EXECUTION) and not self.plan_only:
             await self.send_status("Checking plan paths...", "plan")
             created, existing = scaffold_plan_paths(output, execution_path=self.execution_path)
             if existing:
@@ -691,7 +691,8 @@ class AgentTeam:
                         if plan_out:
                             self.phase_outputs["PLANNER"] = plan_out  # compat
                             self.original_plan_output = plan_out
-                            scaffold_plan_paths(plan_out, execution_path=self.execution_path)
+                            if not self.plan_only:
+                                scaffold_plan_paths(plan_out, execution_path=self.execution_path)
                             save_plan_markdown(
                                 title=next((ln for ln in plan_out.splitlines() if ln.strip()), "Plan"),
                                 plan_text=plan_out,

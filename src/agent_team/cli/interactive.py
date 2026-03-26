@@ -45,7 +45,7 @@ from agent_team.agents.session import SessionContext
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -303,14 +303,14 @@ async def switch_model_remote(model_name: str) -> dict:
 # ── UI Components ────────────────────────────────────────────────────────────
 
 def render_banner():
-    """Show startup banner."""
+    """Show startup banner with status info inside the box."""
     banner_text = Text()
     banner_text.append("  __  __         _        _                    _     _____                    \n", style="bold cyan")
     banner_text.append(" |  \\/  |  __ _ | |_     / \\    __ _  ___ _ __| |_  |_   _|___  __ _ _ __ ___ \n", style="bold cyan")
     banner_text.append(" | |\\/| | / _` || __|   / _ \\  / _` |/ _ \\ '_ \\ __|   | | / _ \\/ _` | '_ ` _ \\\n", style="bold cyan")
     banner_text.append(" | |  | || (_| || |_   / ___ \\| (_| |  __/ | | | |_    | ||  __/ (_| | | | | | |\n", style="bold blue")
     banner_text.append(" |_|  |_| \\__,_| \\__| /_/   \\_\\\\__, |\\___|_| |_|\\__|   |_| \\___|\\__,_|_| |_| |_|\n", style="bold blue")
-    banner_text.append("                                |___/                                           \n", style="bold magenta")
+    banner_text.append("                                |___/                                           ", style="bold magenta")
 
     console.print(Panel(
         banner_text,
@@ -322,28 +322,20 @@ def render_banner():
 
 
 def render_status_bar():
-    """Render current status info."""
-    status = Table.grid(padding=(0, 2))
-    status.add_column(justify="left")
-    status.add_column(justify="left")
-    status.add_column(justify="left")
-    status.add_column(justify="right")
-
+    """Render status info inside a bordered box, matching the banner style."""
     conn_icon = "[green]\u25cf[/]" if state.backend_connected else "[red]\u25cf[/]"
     conn_text = "Connected" if state.backend_connected else "Disconnected"
-
-    mode_icon = MODE_ICONS.get(state.mode, "\U0001f4bb")
-
     cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
 
-    status.add_row(
-        f"{conn_icon} {conn_text}",
-        f"[accent]LLM:[/] {state.llm_provider}",
-        f"[accent]Model:[/] {state.model}",
-        f"[accent]Mode:[/] {mode_icon} {state.mode}",
-    )
-    console.print(Panel(status, border_style="dim blue", padding=(0, 1)))
-    console.print(f"  [dim]Working directory: {cwd_display}[/]")
+    lines = [
+        f"  {conn_icon} {conn_text}  [dim]|[/]  LLM: [accent]{state.llm_provider}[/]  [dim]|[/]  Model: [accent]{state.model}[/]  [dim]|[/]  Mode: [accent]{state.mode}[/]",
+        f"  [dim]Working directory: {cwd_display}[/]",
+    ]
+    console.print(Panel(
+        "\n".join(lines),
+        border_style="dim cyan",
+        padding=(0, 1),
+    ))
 
 
 def render_help():
@@ -1797,7 +1789,7 @@ async def main():
     render_status_bar()
     console.print()
     console.print("[dim]Type [bold]/help[/bold] for available commands, or just start typing your request.[/]")
-    console.print()
+    console.print(Rule(style="dim"))
 
     # Setup prompt session with history
     session = PromptSession(
