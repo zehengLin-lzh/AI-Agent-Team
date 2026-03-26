@@ -98,8 +98,8 @@ class AgentTeam:
 
         # Inject MCP tool descriptions into system prompt for agents that can use them
         spec = AGENT_REGISTRY_MAP.get(agent_name)
-        mcp_stages = ("thinker", "planner", "executor")
-        mcp_legacy = ("THINKER", "PLANNER", "EXECUTOR")
+        mcp_stages = ("orchestrator", "thinker", "planner", "executor")
+        mcp_legacy = ("ORCHESTRATOR", "THINKER", "PLANNER", "EXECUTOR")
         if self.mcp_tools_prompt:
             if (spec and spec.stage in mcp_stages) or agent_name in mcp_legacy:
                 system_prompt += "\n\n" + self.mcp_tools_prompt
@@ -231,6 +231,9 @@ class AgentTeam:
 
         if len(agent_ids) == 1:
             output = await self.run_agent(agent_ids[0])
+            # Check if agent needs user input before proceeding
+            await self.handle_user_question(output, agent_ids[0])
+            output = self.phase_outputs.get(agent_ids[0], output)
             self.phase_outputs[f"STAGE_{stage_name.upper()}"] = output
             return {agent_ids[0]: output}
 
@@ -259,6 +262,9 @@ class AgentTeam:
                         f"Colleague analysis:\n{colleague_text}"
                     ),
                 )
+            # Check if agent needs user input before next agent runs
+            await self.handle_user_question(output, aid)
+            output = self.phase_outputs.get(aid, output)
             outputs[aid] = output
 
         # Synthesis: lead agent combines all perspectives into one canonical output

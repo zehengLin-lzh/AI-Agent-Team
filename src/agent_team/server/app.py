@@ -61,8 +61,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 if tools_prompt:
                     team.mcp_tools_prompt = tools_prompt
                     team.mcp_registry = mcp_reg
-            except Exception:
-                pass
+                    await websocket.send_json({
+                        "type": "status",
+                        "phase": "mcp",
+                        "message": f"MCP: {len(mcp_reg.get_all_tools())} tools loaded",
+                    })
+            except Exception as exc:
+                import traceback
+                await websocket.send_json({
+                    "type": "status",
+                    "phase": "mcp",
+                    "message": f"MCP setup skipped: {exc}",
+                })
+                traceback.print_exc()
 
             mode = data.get("mode", "coding")
             await team.run(data["content"], mode=mode)
