@@ -2,6 +2,52 @@
 
 ---
 
+## v6.0.0 — 12-Agent Collaborative Pipeline (2026-03-26)
+
+### Summary
+
+Multi-agent pipeline upgrade: 12 named agents with personas, parallel execution, stage synthesis, structured handoffs, and re-loop conditions. Complexity-tiered activation keeps simple tasks fast while unlocking full collaborative intelligence for complex work.
+
+### 12 Named Agents
+
+| ID | Name | Role | Stage |
+|---|---|---|---|
+| ORCH_LUMUSI | Lumusi | Sr. Engineering Manager | orchestrator |
+| ORCH_IVOR | Ivor | Sr. Product Manager | orchestrator |
+| THINK_SOREN | Soren | Systems Architect | thinker |
+| THINK_MIKA | Mika | Domain Expert | thinker |
+| THINK_VERA | Vera | Devil's Advocate | thinker |
+| PLAN_ATLAS | Atlas | Project Lead | planner |
+| PLAN_NORA | Nora | Dependency Mapper | planner |
+| EXEC_KAI | Kai | Sr. Implementer | executor |
+| EXEC_DEV | Dev | Artifact Builder | executor |
+| EXEC_SAGE | Sage | Integration Specialist | executor |
+| REV_QUINN | Quinn | QA Lead | reviewer |
+| REV_LENA | Lena | User Advocate | reviewer |
+
+### Complexity-Tiered Phase Orders
+- **SIMPLE** (4 calls): Legacy single-agent pipeline — ORCHESTRATOR → PLANNER → EXECUTOR → REVIEWER
+- **MEDIUM** (7 calls): Dual orchestrator (Lumusi+Ivor) → Soren → Atlas → Kai → Dual reviewer (Quinn+Lena)
+- **COMPLEX** (10+ calls): Full 12-agent pipeline with parallel groups + synthesis passes
+
+### Key Mechanics
+- **Parallel execution**: Multi-agent groups run concurrently via `asyncio.gather`
+- **Stage synthesis**: Lead agent re-invoked with all perspectives to produce single canonical output for downstream stages
+- **Structured handoffs**: `---HANDOFF---` blocks with status (pass|blocked), flags, questions_for_user
+- **Re-loop conditions**: reviewer→executor→planner→thinker→orchestrator chain (bounded by MAX_FIX_LOOPS)
+- **Display names**: Each agent shows with persona name + color in CLI (e.g. "[Lumusi]" in purple)
+
+### Files Modified
+- `agents/definitions.py` — AgentSpec dataclass, AGENT_REGISTRY (12 agents), MEDIUM/COMPLEX_PHASE_ORDER, persona prompts, SYNTHESIS_PROMPT, HANDOFF_FORMAT, RELOOP_TARGETS, STAGE_CONTEXT
+- `agents/runner.py` — run_stage(), _synthesize_stage(), _parse_handoff(), _handle_stage_handoff(), stage-based dispatch loop
+- `agents/http_runner.py` — Mirrored runner.py changes for HTTP pipeline
+- `agents/context.py` — Stage-level context routing, intra_stage_outputs support
+- `config.py` — 12-agent MODEL_ROUTING, MEDIUM_MODEL_ROUTING
+- `cli/interactive.py` — 12 agent icons/colors, display_name rendering
+- `llm/base.py`, `llm/registry.py`, `llm/ollama_provider.py`, `llm/openai_compat.py`, `llm/providers.py`, `llm/huggingface_provider.py` — display_name parameter propagation
+
+---
+
 ## v5.0.0 — Smart Complexity, Color Diffs, Error Learning (2026-03-24)
 
 ### Summary

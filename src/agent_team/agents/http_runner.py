@@ -4,9 +4,11 @@ import re
 from enum import Enum
 from pydantic import BaseModel
 
-from agent_team.config import MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MAX_FIX_LOOPS
+from agent_team.config import MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING, MAX_FIX_LOOPS
 from agent_team.agents.definitions import (
     AgentMode, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
+    MEDIUM_PHASE_ORDER, COMPLEX_PHASE_ORDER,
+    AGENT_REGISTRY_MAP, SYNTHESIS_PROMPT, HANDOFF_FORMAT,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
@@ -44,6 +46,8 @@ def _swap_model(agent_name: str, complexity: str = "medium") -> tuple[str | None
     """Swap to routed model. Returns (original, did_swap)."""
     if complexity == "simple":
         routed = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+    elif complexity == "medium":
+        routed = MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
     else:
         routed = MODEL_ROUTING.get(agent_name)
     if not routed:
@@ -73,17 +77,23 @@ async def _run_agent_http(
     agent_mode: AgentMode = AgentMode.CODING,
     complexity: str = "medium",
     patterns_context: str = "",
+    extra_instruction: str = "",
 ) -> str:
     system_prompt = get_agent_prompt(agent_name, agent_mode, complexity=complexity)
+    # Append handoff format for named agents in multi-agent pipeline
+    if complexity != "simple" and agent_name in AGENT_REGISTRY_MAP:
+        system_prompt += "\n\n" + HANDOFF_FORMAT
     temperature = MODE_TEMPERATURES.get(agent_mode, 0.3)
     messages = build_context_for_agent(
         agent_name, phase_outputs, original_plan,
         patterns_context=patterns_context,
     )
-    messages.append({
-        "role": "user",
-        "content": f"Please proceed as {agent_name}.",
-    })
+    spec = AGENT_REGISTRY_MAP.get(agent_name)
+    display_name = spec.name if spec else agent_name
+    proceed_msg = f"Please proceed as {display_name}."
+    if extra_instruction:
+        proceed_msg += f"\n\n{extra_instruction}"
+    messages.append({"role": "user", "content": proceed_msg})
 
     # Model routing
     original_model, did_swap = _swap_model(agent_name, complexity)
@@ -189,17 +199,73 @@ async def run_team_http(
     # Select phase order based on complexity
     if complexity == TaskComplexity.SIMPLE:
         phase_order = SIMPLE_PHASE_ORDER.get(agent_mode, SIMPLE_PHASE_ORDER[AgentMode.CODING])
+    elif complexity == TaskComplexity.MEDIUM:
+        phase_order = MEDIUM_PHASE_ORDER.get(agent_mode, MEDIUM_PHASE_ORDER[AgentMode.CODING])
     else:
-        phase_order = MODE_PHASE_ORDER.get(agent_mode, MODE_PHASE_ORDER[AgentMode.CODING])
+        phase_order = COMPLEX_PHASE_ORDER.get(agent_mode, COMPLEX_PHASE_ORDER[AgentMode.CODING])
 
     fix_count = 0
     file_changes_data: list[dict] = []
 
+    exec_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE"}
+
     for phase_group in phase_order:
-        if mode == AskMode.PLAN_ONLY and phase_group[0] in ("EXECUTOR",):
+        if mode == AskMode.PLAN_ONLY and exec_stages.intersection(phase_group):
             continue
 
-        if len(phase_group) == 1:
+        is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
+
+        if is_named and len(phase_group) > 1:
+            # Multi-agent parallel execution + synthesis
+            tasks = [
+                _run_agent_http(
+                    aid, user_plan, phase_outputs, agent_mode,
+                    complexity=complexity.value, patterns_context=patterns_context,
+                )
+                for aid in phase_group
+            ]
+            results = await asyncio.gather(*tasks)
+            outputs = dict(zip(phase_group, results))
+
+            # Determine stage name
+            stage_name = AGENT_REGISTRY_MAP[phase_group[0]].stage
+            stage_key = f"STAGE_{stage_name.upper()}"
+
+            # Synthesize: run lead agent again with all perspectives
+            lead = phase_group[0]
+            perspectives = "\n\n---\n\n".join(
+                f"[{AGENT_REGISTRY_MAP[a].name}]:\n{o}" for a, o in outputs.items()
+            )
+            synth = await _run_agent_http(
+                lead, user_plan, phase_outputs, agent_mode,
+                complexity=complexity.value, patterns_context=patterns_context,
+                extra_instruction=f"{SYNTHESIS_PROMPT}\n\n{perspectives}",
+            )
+            phase_outputs[stage_key] = synth
+            # Also store under legacy keys for compat
+            if stage_name == "planner":
+                phase_outputs["PLANNER"] = synth
+            elif stage_name == "orchestrator":
+                phase_outputs["ORCHESTRATOR"] = synth
+            elif stage_name == "executor":
+                phase_outputs["EXECUTOR"] = synth
+
+            continue
+
+        if is_named and len(phase_group) == 1:
+            agent = phase_group[0]
+            output = await _run_agent_http(
+                agent, user_plan, phase_outputs, agent_mode,
+                complexity=complexity.value, patterns_context=patterns_context,
+            )
+            stage_name = AGENT_REGISTRY_MAP[agent].stage
+            phase_outputs[f"STAGE_{stage_name.upper()}"] = output
+            # Legacy compat
+            legacy_map = {"orchestrator": "ORCHESTRATOR", "thinker": "THINKER",
+                          "planner": "PLANNER", "executor": "EXECUTOR", "reviewer": "REVIEWER"}
+            if stage_name in legacy_map:
+                phase_outputs[legacy_map[stage_name]] = output
+        elif len(phase_group) == 1:
             agent = phase_group[0]
             output = await _run_agent_http(
                 agent, user_plan, phase_outputs, agent_mode,

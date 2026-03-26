@@ -50,6 +50,7 @@ BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
 AGENT_ICONS = {
+    # Legacy agents
     "ORCHESTRATOR": "\u2692",        # ⚒
     "THINKER": "\U0001f9e0",         # 🧠
     "CHALLENGER": "\u2694",          # ⚔
@@ -57,6 +58,19 @@ AGENT_ICONS = {
     "PLANNER": "\U0001f4d0",         # 📐
     "EXECUTOR": "\u26a1",            # ⚡
     "REVIEWER": "\U0001f50d",        # 🔍
+    # Named agents (12-agent pipeline)
+    "ORCH_LUMUSI": "\u2692",         # ⚒ (Lumusi — Eng Manager)
+    "ORCH_IVOR": "\U0001f4cb",      # 📋 (Ivor — Product Manager)
+    "THINK_SOREN": "\U0001f9e0",    # 🧠 (Soren — Systems Architect)
+    "THINK_MIKA": "\U0001f30d",     # 🌍 (Mika — Domain Expert)
+    "THINK_VERA": "\u2694",         # ⚔ (Vera — Devil's Advocate)
+    "PLAN_ATLAS": "\U0001f4d0",     # 📐 (Atlas — Project Lead)
+    "PLAN_NORA": "\U0001f50d",      # 🔍 (Nora — Dependency Mapper)
+    "EXEC_KAI": "\u26a1",           # ⚡ (Kai — Sr. Implementer)
+    "EXEC_DEV": "\U0001f527",       # 🔧 (Dev — Artifact Builder)
+    "EXEC_SAGE": "\U0001f517",      # 🔗 (Sage — Integration Specialist)
+    "REV_QUINN": "\u2705",          # ✅ (Quinn — QA Lead)
+    "REV_LENA": "\U0001f465",       # 👥 (Lena — User Advocate)
 }
 
 MODE_ICONS = {
@@ -72,6 +86,7 @@ VALID_MODES = ["thinking", "coding", "brainstorming", "architecture", "execution
 # ── Rich theme ───────────────────────────────────────────────────────────────
 
 custom_theme = Theme({
+    # Legacy agents
     "agent.orchestrator": "bold green",
     "agent.thinker": "bold magenta",
     "agent.challenger": "bold red",
@@ -79,6 +94,19 @@ custom_theme = Theme({
     "agent.planner": "bold yellow",
     "agent.executor": "bold cyan",
     "agent.reviewer": "bold red",
+    # Named agents
+    "agent.orch_lumusi": "bold bright_magenta",
+    "agent.orch_ivor": "bold blue",
+    "agent.think_soren": "bold bright_blue",
+    "agent.think_mika": "bold bright_cyan",
+    "agent.think_vera": "bold cyan",
+    "agent.plan_atlas": "bold yellow",
+    "agent.plan_nora": "bold bright_yellow",
+    "agent.exec_kai": "bold green",
+    "agent.exec_dev": "bold bright_green",
+    "agent.exec_sage": "bold cyan",
+    "agent.rev_quinn": "bold red",
+    "agent.rev_lena": "bold bright_magenta",
     "info": "dim cyan",
     "success": "bold green",
     "warning": "bold yellow",
@@ -416,14 +444,15 @@ def render_token_summary(summary: dict | None = None):
     console.print()
 
 
-def render_agent_header(agent_name: str, model: str = ""):
+def render_agent_header(agent_name: str, model: str = "", display_name: str = ""):
     """Show a styled agent header."""
     icon = AGENT_ICONS.get(agent_name, "\u2022")
     style_name = f"agent.{agent_name.lower()}"
+    label = display_name or agent_name
     model_tag = f" [dim]({model})[/]" if model else ""
     console.print()
     console.print(Rule(
-        f"[{style_name}]{icon} {agent_name}[/]{model_tag}",
+        f"[{style_name}]{icon} {label}[/]{model_tag}",
         style=style_name.replace("agent.", ""),
     ))
 
@@ -572,8 +601,9 @@ async def stream_conversation(
                 elif t == "agent_start":
                     current_agent = msg.get("agent", "")
                     model = msg.get("model", state.model)
+                    display_name = msg.get("display_name", "")
                     current_buffer = ""
-                    render_agent_header(current_agent, model)
+                    render_agent_header(current_agent, model, display_name=display_name)
 
                 elif t == "token":
                     token = msg.get("content", "")

@@ -71,6 +71,7 @@ class LLMProvider(ABC):
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
+        display_name: str = "",
     ) -> str:
         """Stream a response, sending tokens over WebSocket. Returns full response."""
         ...

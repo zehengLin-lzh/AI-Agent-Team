@@ -74,6 +74,7 @@ class AnthropicProvider(OpenAICompatProvider):
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
+        display_name: str = "",
     ) -> str:
         model = self._active_model
         full_response = ""

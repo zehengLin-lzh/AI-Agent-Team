@@ -1,5 +1,5 @@
 """Context building for agents with token budget management."""
-from agent_team.agents.definitions import CONTEXT_AGENTS
+from agent_team.agents.definitions import CONTEXT_AGENTS, STAGE_CONTEXT, AGENT_REGISTRY_MAP
 
 
 def estimate_tokens(text: str) -> int:
@@ -35,9 +35,16 @@ def build_context_for_agent(
     original_plan: str,
     memory_context: str = "",
     patterns_context: str = "",
+    intra_stage_outputs: dict[str, str] | None = None,
     max_tokens: int = 24000,
 ) -> list[dict]:
-    """Build the message history an agent should see, with token budgeting."""
+    """Build the message history an agent should see, with token budgeting.
+
+    For legacy agents (ORCHESTRATOR, THINKER, etc.), uses CONTEXT_AGENTS.
+    For named agents (ORCH_LUMUSI, THINK_SOREN, etc.), uses STAGE_CONTEXT
+    for prior-stage outputs and optionally intra_stage_outputs for
+    within-stage colleague perspectives.
+    """
     messages = []
     token_count = 0
 
@@ -54,7 +61,6 @@ def build_context_for_agent(
             memory_context = truncate_to_tokens(memory_context, max_mem)
             mem_tokens = max_mem
         if token_count + mem_tokens < max_tokens:
-            # Label scan context prominently so agents reference it
             label = "IMPORTANT CONTEXT — reference specific files, functions, and patterns below:"
             if "## Repository Context" in memory_context or "## Directory Structure" in memory_context:
                 label = "REPOSITORY SCAN RESULTS — you MUST reference specific files and code from this context in your analysis:"
@@ -78,10 +84,18 @@ def build_context_for_agent(
             })
             token_count += pat_tokens
 
-    # Priority 3: Prior agent outputs (most recent first, truncate if needed)
-    for prior_agent in CONTEXT_AGENTS.get(agent_name, []):
-        if prior_agent in phase_outputs:
-            output = phase_outputs[prior_agent]
+    # Priority 3: Prior outputs — use stage context for named agents, legacy for others
+    spec = AGENT_REGISTRY_MAP.get(agent_name)
+    if spec:
+        # Named agent: use STAGE_CONTEXT for synthesized prior-stage outputs
+        prior_keys = STAGE_CONTEXT.get(spec.stage, [])
+    else:
+        # Legacy agent: use CONTEXT_AGENTS
+        prior_keys = CONTEXT_AGENTS.get(agent_name, [])
+
+    for prior_key in prior_keys:
+        if prior_key in phase_outputs:
+            output = phase_outputs[prior_key]
             output_tokens = estimate_tokens(output)
             remaining = max_tokens - token_count
             if remaining <= 0:
@@ -90,5 +104,22 @@ def build_context_for_agent(
                 output = truncate_to_tokens(output, remaining)
             messages.append({"role": "assistant", "content": output})
             token_count += estimate_tokens(output)
+
+    # Priority 4: Intra-stage outputs (other agents in same stage)
+    if intra_stage_outputs:
+        for colleague_id, colleague_output in intra_stage_outputs.items():
+            if colleague_id == agent_name:
+                continue
+            remaining = max_tokens - token_count
+            if remaining <= 200:
+                break
+            colleague_spec = AGENT_REGISTRY_MAP.get(colleague_id)
+            label = colleague_spec.name if colleague_spec else colleague_id
+            content = f"[{label}'s perspective]:\n{colleague_output}"
+            output_tokens = estimate_tokens(content)
+            if output_tokens > remaining:
+                content = truncate_to_tokens(content, remaining)
+            messages.append({"role": "assistant", "content": content})
+            token_count += estimate_tokens(content)
 
     return messages

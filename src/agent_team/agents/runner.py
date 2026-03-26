@@ -4,9 +4,13 @@ import json
 import re
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent_team.config import MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING, SIMPLE_MODEL_ROUTING
+from agent_team.config import (
+    MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING,
+)
 from agent_team.agents.definitions import (
     AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
+    MEDIUM_PHASE_ORDER, COMPLEX_PHASE_ORDER,
+    AGENT_REGISTRY_MAP, SYNTHESIS_PROMPT, HANDOFF_FORMAT, RELOOP_TARGETS,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
@@ -34,6 +38,7 @@ class AgentTeam:
         self.prior_phase_outputs = prior_phase_outputs or {}
         self.phase_outputs: dict[str, str] = {}
         self.fix_loop_count = 0
+        self.reloop_count = 0
         self.original_plan = ""
         self.mode = AgentMode.CODING
         self.complexity = TaskComplexity.MEDIUM
@@ -56,6 +61,8 @@ class AgentTeam:
         """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
         if self.complexity == TaskComplexity.SIMPLE:
             routed_model = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        elif self.complexity == TaskComplexity.MEDIUM:
+            routed_model = MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
         else:
             routed_model = MODEL_ROUTING.get(agent_name)
         if not routed_model:
@@ -77,24 +84,39 @@ class AgentTeam:
             except Exception:
                 pass
 
-    async def run_agent(self, agent_name: str) -> str:
+    async def run_agent(
+        self, agent_name: str,
+        intra_stage_outputs: dict[str, str] | None = None,
+        extra_instruction: str = "",
+    ) -> str:
         """Run a single agent and store its output."""
         system_prompt = get_agent_prompt(agent_name, self.mode, complexity=self.complexity.value)
 
+        # For MEDIUM/COMPLEX, append handoff format instructions
+        if self.complexity != TaskComplexity.SIMPLE and agent_name in AGENT_REGISTRY_MAP:
+            system_prompt += "\n\n" + HANDOFF_FORMAT
+
         # Inject MCP tool descriptions into system prompt for agents that can use them
-        if self.mcp_tools_prompt and agent_name in ("THINKER", "PLANNER", "EXECUTOR"):
-            system_prompt += "\n\n" + self.mcp_tools_prompt
+        spec = AGENT_REGISTRY_MAP.get(agent_name)
+        mcp_stages = ("thinker", "planner", "executor")
+        mcp_legacy = ("THINKER", "PLANNER", "EXECUTOR")
+        if self.mcp_tools_prompt:
+            if (spec and spec.stage in mcp_stages) or agent_name in mcp_legacy:
+                system_prompt += "\n\n" + self.mcp_tools_prompt
 
         temperature = MODE_TEMPERATURES.get(self.mode, 0.3)
         messages = build_context_for_agent(
             agent_name, self.phase_outputs, self.original_plan,
             memory_context=self.memory_context,
             patterns_context=self.patterns_context,
+            intra_stage_outputs=intra_stage_outputs,
         )
-        messages.append({
-            "role": "user",
-            "content": f"Please proceed as {agent_name}.",
-        })
+
+        display_name = spec.name if spec else agent_name
+        proceed_msg = f"Please proceed as {display_name}."
+        if extra_instruction:
+            proceed_msg += f"\n\n{extra_instruction}"
+        messages.append({"role": "user", "content": proceed_msg})
 
         # Model routing: swap to the configured model for this agent role
         original_model, did_swap = self._swap_model_for_agent(agent_name)
@@ -108,6 +130,7 @@ class AgentTeam:
                 agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
                 temperature=temperature,
                 token_tracker=self.token_tracker,
+                display_name=display_name,
             )
         finally:
             self._restore_model(original_model, did_swap)
@@ -169,6 +192,134 @@ class AgentTeam:
             await self.run_agent(agent_name)
             return True
         return False
+
+    # -- Multi-agent stage methods (MEDIUM/COMPLEX) ----------------------------
+
+    def _get_stage_name(self, agent_ids: list[str]) -> str:
+        """Determine the stage name from agent IDs."""
+        for aid in agent_ids:
+            spec = AGENT_REGISTRY_MAP.get(aid)
+            if spec:
+                return spec.stage
+        # Legacy agent — infer stage from name
+        first = agent_ids[0]
+        for stage in ("orchestrator", "thinker", "planner", "executor", "reviewer"):
+            if stage.upper() in first.upper():
+                return stage
+        return "unknown"
+
+    async def run_stage(self, agent_ids: list[str], stage_name: str) -> dict[str, str]:
+        """Run a pipeline stage with 1+ agents. Handles parallel execution and synthesis."""
+        phase_label = {
+            "orchestrator": "Understanding your request",
+            "thinker": "Deep analysis",
+            "planner": "Planning",
+            "executor": "Producing output",
+            "reviewer": "Quality review",
+        }.get(stage_name, stage_name.title())
+        await self.send_status(f"{phase_label} ({', '.join(AGENT_REGISTRY_MAP[a].name for a in agent_ids if a in AGENT_REGISTRY_MAP)})...", stage_name)
+
+        if len(agent_ids) == 1:
+            output = await self.run_agent(agent_ids[0])
+            self.phase_outputs[f"STAGE_{stage_name.upper()}"] = output
+            return {agent_ids[0]: output}
+
+        # Parallel execution
+        tasks = [self.run_agent(aid) for aid in agent_ids]
+        results = await asyncio.gather(*tasks)
+        outputs = dict(zip(agent_ids, results))
+
+        # Synthesis: re-invoke the first agent to combine perspectives
+        synth = await self._synthesize_stage(agent_ids[0], outputs, stage_name)
+        self.phase_outputs[f"STAGE_{stage_name.upper()}"] = synth
+        return outputs
+
+    async def _synthesize_stage(
+        self, lead_agent_id: str, outputs: dict[str, str], stage_name: str,
+    ) -> str:
+        """Synthesize multiple agent outputs into a single stage output."""
+        spec = AGENT_REGISTRY_MAP.get(lead_agent_id)
+        if not spec:
+            # Fallback: just concatenate
+            return "\n\n".join(outputs.values())
+
+        await self.send_status(f"Synthesizing {stage_name} perspectives...", stage_name)
+
+        # Build the perspectives text
+        perspectives = []
+        for aid, out in outputs.items():
+            s = AGENT_REGISTRY_MAP.get(aid)
+            name = s.name if s else aid
+            perspectives.append(f"[{name}]:\n{out}")
+        perspectives_text = "\n\n---\n\n".join(perspectives)
+
+        synth_output = await self.run_agent(
+            lead_agent_id,
+            extra_instruction=(
+                f"{SYNTHESIS_PROMPT}\n\n"
+                f"The individual perspectives:\n\n{perspectives_text}"
+            ),
+        )
+        return synth_output
+
+    def _parse_handoff(self, output: str) -> dict | None:
+        """Parse structured handoff block from stage output."""
+        m = re.search(
+            r"---HANDOFF---\s*\n(.*?)---END_HANDOFF---",
+            output,
+            re.DOTALL,
+        )
+        if not m:
+            return None
+        block = m.group(1)
+        result: dict = {"status": "pass", "flags": [], "questions_for_user": []}
+        for line in block.strip().splitlines():
+            line = line.strip()
+            if line.startswith("status:"):
+                result["status"] = line.split(":", 1)[1].strip()
+            elif line.startswith("flags:"):
+                val = line.split(":", 1)[1].strip().strip("[]")
+                result["flags"] = [f.strip() for f in val.split(",") if f.strip()]
+            elif line.startswith("questions_for_user:"):
+                val = line.split(":", 1)[1].strip().strip("[]")
+                result["questions_for_user"] = [q.strip() for q in val.split(",") if q.strip()]
+        return result
+
+    async def _handle_stage_handoff(self, stage_name: str) -> bool:
+        """Check handoff status after a stage. Returns True if pipeline should re-loop."""
+        stage_key = f"STAGE_{stage_name.upper()}"
+        output = self.phase_outputs.get(stage_key, "")
+        handoff = self._parse_handoff(output)
+        if not handoff or handoff["status"] == "pass":
+            return False
+
+        # Blocked — check for user questions
+        questions = handoff.get("questions_for_user", [])
+        if questions:
+            question_text = "\n".join(f"- {q}" for q in questions)
+            await self.ws.send_json({
+                "type": "waiting_for_user",
+                "question": f"The {stage_name} stage needs clarification:\n{question_text}",
+                "agent": stage_name,
+            })
+            user_reply = await self.ws.receive_text()
+            data = json.loads(user_reply)
+            self.phase_outputs[stage_key] += f"\n\nUser clarification: {data['content']}"
+            return True  # Re-run this stage
+
+        # Blocked without questions — re-loop to target stage
+        target = RELOOP_TARGETS.get(stage_name)
+        if target and self.reloop_count < MAX_FIX_LOOPS:
+            self.reloop_count += 1
+            flags = ", ".join(handoff.get("flags", ["unspecified"]))
+            await self.send_status(
+                f"{stage_name.title()} blocked ({flags}) — looping back to {target}...",
+                stage_name,
+            )
+            return True  # Caller handles re-loop
+        return False
+
+    # -- Legacy single-agent stage handlers (used by SIMPLE tasks) -------------
 
     async def run_orchestrator(self):
         await self.send_status(f"Phase 1: Understanding your request ({self.mode.value} mode)...", "intake")
@@ -284,56 +435,51 @@ class AgentTeam:
             if created:
                 await self.send_status(f"Scaffolded {len(created)} path(s).", "plan")
 
-    async def run_executor(self):
-        await self.send_status("Phase 4: Producing output...", "execute")
+    async def _write_executor_files(self, executor_output: str):
+        """Write files from executor output to disk (shared by legacy and named pipeline)."""
+        if self.mode not in (AgentMode.CODING, AgentMode.EXECUTION):
+            return
         skip_existing = self.phase_outputs.get("_existing_file_choice", "overwrite").startswith("skip")
-        executor_output = await self.run_agent("EXECUTOR")
-
-        # Write files if in coding/execution mode
-        if self.mode in (AgentMode.CODING, AgentMode.EXECUTION):
-            changes = extract_and_write_files(
-                executor_output, execution_path=self.execution_path,
-                skip_existing=skip_existing,
-                planner_output=self.phase_outputs.get("PLANNER", ""),
+        changes = extract_and_write_files(
+            executor_output, execution_path=self.execution_path,
+            skip_existing=skip_existing,
+            planner_output=self.phase_outputs.get("PLANNER", "") or self.phase_outputs.get("STAGE_PLANNER", ""),
+        )
+        if not changes:
+            await self.send_status(
+                "Warning: EXECUTOR output did not contain recognizable file blocks.",
+                "execute",
             )
-            if not changes:
-                await self.send_status(
-                    "Warning: EXECUTOR output did not contain recognizable file blocks.",
-                    "execute",
-                )
-            if changes:
-                base = _resolve_base_dir(self.execution_path)
-                # Send rich file change data with diffs for color-coded display
-                await self.ws.send_json({
-                    "type": "file_changes",
-                    "files": [
-                        {
-                            "path": str(c.path),
-                            "is_new": c.is_new,
-                            "diff": c.diff,
-                            "preview": c.preview,
-                        }
-                        for c in changes
-                    ],
-                    "base_dir": str(base),
-                })
-                await self.send_status(f"Wrote {len(changes)} file(s).", "execute")
+        if changes:
+            base = _resolve_base_dir(self.execution_path)
+            await self.ws.send_json({
+                "type": "file_changes",
+                "files": [
+                    {"path": str(c.path), "is_new": c.is_new, "diff": c.diff, "preview": c.preview}
+                    for c in changes
+                ],
+                "base_dir": str(base),
+            })
+            await self.send_status(f"Wrote {len(changes)} file(s).", "execute")
 
-        # Run commands if in execution mode
         if self.mode == AgentMode.EXECUTION:
             commands = extract_run_commands(executor_output)
             if commands:
                 await self.send_status("Running commands...", "execute")
                 from agent_team.security.sandbox import SandboxExecutor
-                sandbox = SandboxExecutor(
-                    workspace=_resolve_base_dir(self.execution_path)
-                )
+                sandbox = SandboxExecutor(workspace=_resolve_base_dir(self.execution_path))
                 results = []
                 for desc, cmd in commands:
                     await self.send_status(f"Executing: {desc}", "execute")
                     stdout, stderr, code = await sandbox.execute(cmd)
                     results.append(f"## {desc}\nExit code: {code}\nStdout: {stdout}\nStderr: {stderr}")
                 self.phase_outputs["EXECUTION_RESULTS"] = "\n\n".join(results)
+
+    async def run_executor(self):
+        """Legacy executor handler for SIMPLE pipeline."""
+        await self.send_status("Phase 4: Producing output...", "execute")
+        executor_output = await self.run_agent("EXECUTOR")
+        await self._write_executor_files(executor_output)
 
     async def run_reviewer(self):
         await self.send_status("Phase 5: Quality review...", "verify")
@@ -450,42 +596,71 @@ class AgentTeam:
                     phase_order = list(SIMPLE_PHASE_ORDER.get(
                         self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
                     ))
-                else:
-                    phase_order = list(MODE_PHASE_ORDER.get(
-                        self.mode, MODE_PHASE_ORDER[AgentMode.CODING]
+                elif self.complexity == TaskComplexity.MEDIUM:
+                    phase_order = list(MEDIUM_PHASE_ORDER.get(
+                        self.mode, MEDIUM_PHASE_ORDER[AgentMode.CODING]
                     ))
-                # A1: Skip EXECUTOR when plan_only
+                else:  # COMPLEX
+                    phase_order = list(COMPLEX_PHASE_ORDER.get(
+                        self.mode, COMPLEX_PHASE_ORDER[AgentMode.CODING]
+                    ))
+                # A1: Skip EXECUTOR phases when plan_only
                 if self.plan_only:
-                    phase_order = [g for g in phase_order if g != ["EXECUTOR"]]
+                    exec_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE"}
+                    phase_order = [g for g in phase_order if not exec_stages.intersection(g)]
+
+            # -- Main pipeline loop --
+            _LEGACY_HANDLERS = {
+                "ORCHESTRATOR": self.run_orchestrator,
+                "THINKER": self.run_thinker,
+                "PLANNER": self.run_planner,
+                "EXECUTOR": self.run_executor,
+                "REVIEWER": self.run_reviewer,
+            }
 
             for phase_group in phase_order:
-                if len(phase_group) == 1:
+                is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
+
+                if is_named:
+                    # Multi-agent pipeline (MEDIUM/COMPLEX)
+                    stage_name = self._get_stage_name(phase_group)
+                    await self.run_stage(phase_group, stage_name)
+
+                    # Post-stage processing for named agents
+                    if stage_name == "planner":
+                        plan_out = self.phase_outputs.get(f"STAGE_PLANNER", "")
+                        if plan_out:
+                            self.phase_outputs["PLANNER"] = plan_out  # compat
+                            self.original_plan_output = plan_out
+                            scaffold_plan_paths(plan_out, execution_path=self.execution_path)
+                            save_plan_markdown(
+                                title=next((ln for ln in plan_out.splitlines() if ln.strip()), "Plan"),
+                                plan_text=plan_out,
+                                execution_path=self.execution_path,
+                                mode=self.mode.value,
+                            )
+                    elif stage_name == "executor":
+                        # Trigger file writing from executor output
+                        exec_out = self.phase_outputs.get(f"STAGE_EXECUTOR", "")
+                        if exec_out:
+                            self.phase_outputs["EXECUTOR"] = exec_out  # compat
+                            await self._write_executor_files(exec_out)
+
+                    # Check handoff status
+                    await self._handle_stage_handoff(stage_name)
+
+                elif len(phase_group) == 1:
+                    # Legacy single-agent (SIMPLE)
                     agent = phase_group[0]
-                    handler = {
-                        "ORCHESTRATOR": self.run_orchestrator,
-                        "THINKER": self.run_thinker,
-                        "PLANNER": self.run_planner,
-                        "EXECUTOR": self.run_executor,
-                        "REVIEWER": self.run_reviewer,
-                    }.get(agent)
+                    handler = _LEGACY_HANDLERS.get(agent)
                     if handler:
                         await handler()
                     # Run debate after THINKER (skip for simple tasks)
                     if agent == "THINKER" and self.complexity != TaskComplexity.SIMPLE:
                         await self.run_debate()
                 else:
-                    # Parallel execution
-                    tasks = []
-                    for agent in phase_group:
-                        handler = {
-                            "ORCHESTRATOR": self.run_orchestrator,
-                            "THINKER": self.run_thinker,
-                            "PLANNER": self.run_planner,
-                            "EXECUTOR": self.run_executor,
-                            "REVIEWER": self.run_reviewer,
-                        }.get(agent)
-                        if handler:
-                            tasks.append(handler())
+                    # Legacy parallel group (shouldn't happen in SIMPLE, but just in case)
+                    tasks = [_LEGACY_HANDLERS[a]() for a in phase_group if a in _LEGACY_HANDLERS]
                     if tasks:
                         await asyncio.gather(*tasks)
 

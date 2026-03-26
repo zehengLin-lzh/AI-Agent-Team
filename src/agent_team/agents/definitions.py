@@ -1,4 +1,5 @@
 """Agent role definitions with mode-specific system prompts."""
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -19,8 +20,141 @@ class AgentMode(str, Enum):
     EXECUTION = "execution"
 
 
-# Agent role colors
+# ---------------------------------------------------------------------------
+# Named Agent Registry — 12 agents with personas for multi-agent pipeline
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """Specification for a named agent in the pipeline."""
+    id: str             # internal key, e.g. "ORCH_LUMUSI"
+    name: str           # display name, e.g. "Lumusi"
+    role: str           # persona title
+    stage: str          # orchestrator|thinker|planner|executor|reviewer
+    color: str          # hex color for CLI/WebSocket
+    persona: str        # one-line persona injected into system prompt
+    model_tier: str     # fast|reasoning|coding
+
+
+AGENT_REGISTRY: list[AgentSpec] = [
+    # -- Orchestrator (2 agents) --
+    AgentSpec(
+        "ORCH_LUMUSI", "Lumusi", "Senior Engineering Manager", "orchestrator",
+        "#9333ea",
+        "You are a senior engineering manager. Frame the task technically — "
+        "identify what is being built, constraints, unknowns, and how it fits "
+        "into the engineering roadmap. Push back if the request is underspecified.",
+        "fast",
+    ),
+    AgentSpec(
+        "ORCH_IVOR", "Ivor", "Senior Product Manager", "orchestrator",
+        "#6366f1",
+        "You are a senior product manager. Identify the underlying goal, "
+        "user/business value, priority, and whether the direction solves the "
+        "right problem. Challenge purely technical assumptions.",
+        "fast",
+    ),
+    # -- Thinker + Challenger (3 agents) --
+    AgentSpec(
+        "THINK_SOREN", "Soren", "Systems Architect", "thinker",
+        "#3b82f6",
+        "You are a systems architect. Think through technical feasibility, "
+        "system components, hidden dependencies, and trade-offs across approaches. "
+        "Reason about data flow, scalability, and integration complexity. "
+        "Propose the core technical direction.",
+        "reasoning",
+    ),
+    AgentSpec(
+        "THINK_MIKA", "Mika", "Domain Expert", "thinker",
+        "#06b6d4",
+        "You are a domain subject matter expert. Apply deep contextual knowledge — "
+        "what patterns have worked before, common pitfalls in this space, and "
+        "assumptions that may not hold in practice. Enrich and pressure-test "
+        "the architectural thinking with real-world nuance.",
+        "reasoning",
+    ),
+    AgentSpec(
+        "THINK_VERA", "Vera", "Devil's Advocate", "thinker",
+        "#0ea5e9",
+        "You are a contrarian analyst and risk evaluator. Challenge every assumption. "
+        "Ask 'what if this is wrong?' and 'what breaks this plan?'. Surface blind "
+        "spots in security, performance, cost, and integration. If a challenge is "
+        "resolved, acknowledge it. If not, flag it explicitly.",
+        "reasoning",
+    ),
+    # -- Planner (2 agents) --
+    AgentSpec(
+        "PLAN_ATLAS", "Atlas", "Project Lead", "planner",
+        "#f59e0b",
+        "You are a senior project lead. Break the solution into a concrete "
+        "execution plan with ordered steps, estimated complexity, and clear "
+        "handoff points. Identify parallelism opportunities. Define 'done' "
+        "criteria for each step.",
+        "reasoning",
+    ),
+    AgentSpec(
+        "PLAN_NORA", "Nora", "Dependency Mapper", "planner",
+        "#eab308",
+        "You are a dependency mapping specialist. Audit the plan for hidden "
+        "dependencies, missing prerequisites, and integration touch points. "
+        "Ensure no step assumes something not yet established. Call out all "
+        "external dependencies (APIs, data, services, environment).",
+        "reasoning",
+    ),
+    # -- Executor (3 agents) --
+    AgentSpec(
+        "EXEC_KAI", "Kai", "Senior Implementer", "executor",
+        "#22c55e",
+        "You are a senior full-stack implementer. Execute assigned subtasks — "
+        "writing code, building logic, integrating components — with high craft. "
+        "When you encounter ambiguity, make a reasonable decision and document it. "
+        "Prioritize correctness and readability over cleverness.",
+        "coding",
+    ),
+    AgentSpec(
+        "EXEC_DEV", "Dev", "Artifact Builder", "executor",
+        "#10b981",
+        "You are a specialist artifact builder. Produce all structured outputs: "
+        "schemas, configs, data models, test cases, API specs, and documentation. "
+        "Ensure all artifacts are complete, well-formatted, and internally consistent.",
+        "coding",
+    ),
+    AgentSpec(
+        "EXEC_SAGE", "Sage", "Integration Specialist", "executor",
+        "#14b8a6",
+        "You are an integration specialist. Ensure outputs from other executors "
+        "fit together — interfaces match, data contracts are consistent, no gaps. "
+        "Handle cross-cutting concerns: error handling, logging, environment config. "
+        "Surface integration mismatches.",
+        "coding",
+    ),
+    # -- Reviewer (2 agents) --
+    AgentSpec(
+        "REV_QUINN", "Quinn", "QA Lead", "reviewer",
+        "#f43f5e",
+        "You are a senior QA lead. Validate output against the plan and solution. "
+        "Check correctness, completeness, consistency, and constraint adherence. "
+        "Distinguish blocking issues (must fix) from non-blocking observations.",
+        "reasoning",
+    ),
+    AgentSpec(
+        "REV_LENA", "Lena", "User Advocate", "reviewer",
+        "#ec4899",
+        "You are a user experience advocate. Evaluate from the end user's perspective — "
+        "is it understandable, complete, and free of friction? Something technically "
+        "correct can still fail the user if it's confusing or missing context. "
+        "Flag anything that would leave the user uncertain.",
+        "reasoning",
+    ),
+]
+
+# Build lookup maps from registry
+AGENT_REGISTRY_MAP: dict[str, AgentSpec] = {a.id: a for a in AGENT_REGISTRY}
+
+# Agent role colors — derived from registry + legacy keys for backward compat
 AGENT_COLORS = {
+    # Legacy keys (used by SIMPLE pipeline)
     "ORCHESTRATOR": "#00ffaa",
     "THINKER": "#a78bfa",
     "PLANNER": "#fbbf24",
@@ -30,6 +164,8 @@ AGENT_COLORS = {
     "LEARNER": "#94a3b8",
     "CHALLENGER": "#ff6b6b",
     "THINKER_REFINED": "#c084fc",
+    # Named agents (from registry)
+    **{a.id: a.color for a in AGENT_REGISTRY},
 }
 
 # Mode-specific temperatures
@@ -107,6 +243,88 @@ SIMPLE_PHASE_ORDER: dict[AgentMode, list[list[str]]] = {
         ["PLANNER"],
         ["EXECUTOR"],
         ["REVIEWER"],
+    ],
+}
+
+
+# Multi-agent phase orders for MEDIUM and COMPLEX tasks
+MEDIUM_PHASE_ORDER: dict[AgentMode, list[list[str]]] = {
+    AgentMode.THINKING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN"],
+        ["PLAN_ATLAS"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.CODING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN"],
+        ["PLAN_ATLAS"],
+        ["EXEC_KAI"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.BRAINSTORMING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN"],
+        ["PLAN_ATLAS"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.ARCHITECTURE: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN"],
+        ["PLAN_ATLAS"],
+        ["EXEC_KAI"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.EXECUTION: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN"],
+        ["PLAN_ATLAS"],
+        ["EXEC_KAI"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+}
+
+COMPLEX_PHASE_ORDER: dict[AgentMode, list[list[str]]] = {
+    AgentMode.THINKING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN", "THINK_MIKA"],
+        ["THINK_VERA"],
+        ["PLAN_ATLAS", "PLAN_NORA"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.CODING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN", "THINK_MIKA"],
+        ["THINK_VERA"],
+        ["PLAN_ATLAS", "PLAN_NORA"],
+        ["EXEC_KAI", "EXEC_DEV"],
+        ["EXEC_SAGE"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.BRAINSTORMING: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN", "THINK_MIKA"],
+        ["THINK_VERA"],
+        ["PLAN_ATLAS", "PLAN_NORA"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.ARCHITECTURE: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN", "THINK_MIKA"],
+        ["THINK_VERA"],
+        ["PLAN_ATLAS", "PLAN_NORA"],
+        ["EXEC_KAI", "EXEC_DEV"],
+        ["EXEC_SAGE"],
+        ["REV_QUINN", "REV_LENA"],
+    ],
+    AgentMode.EXECUTION: [
+        ["ORCH_LUMUSI", "ORCH_IVOR"],
+        ["THINK_SOREN", "THINK_MIKA"],
+        ["THINK_VERA"],
+        ["PLAN_ATLAS", "PLAN_NORA"],
+        ["EXEC_KAI", "EXEC_DEV"],
+        ["EXEC_SAGE"],
+        ["REV_QUINN", "REV_LENA"],
     ],
 }
 
@@ -931,13 +1149,24 @@ Confidence: <percentage>%
 def get_agent_prompt(role: str, mode: AgentMode, complexity: str = "medium") -> str:
     """Get the system prompt for an agent role in a specific mode.
 
-    When complexity is 'simple', returns a shorter, more direct prompt for
-    roles that have simplified variants (ORCHESTRATOR, PLANNER).
+    Supports both legacy agent names (ORCHESTRATOR, THINKER, etc.) and
+    new named agents (ORCH_LUMUSI, THINK_SOREN, etc.).
     """
     # For simple tasks, check for simplified prompt first
     if complexity == "simple" and role in SIMPLE_PROMPTS:
         return SIMPLE_PROMPTS[role]
 
+    # Check if this is a named agent from the registry
+    spec = AGENT_REGISTRY_MAP.get(role)
+    if spec:
+        # Use the stage-level base prompt with persona injection
+        stage_prompts = _STAGE_PROMPT_MAPS.get(spec.stage, {})
+        base = stage_prompts.get(mode) or stage_prompts.get(AgentMode.CODING, "")
+        if base:
+            return f"Your name is {spec.name}. {spec.persona}\n\n{base}"
+        return f"Your name is {spec.name}. {spec.persona}"
+
+    # Legacy agent lookup
     prompt_maps = {
         "ORCHESTRATOR": ORCHESTRATOR_PROMPTS,
         "THINKER": THINKER_PROMPTS,
@@ -950,16 +1179,77 @@ def get_agent_prompt(role: str, mode: AgentMode, complexity: str = "medium") -> 
         return f"You are {role}."
     prompt = prompt_map.get(mode)
     if not prompt:
-        # Fallback to coding mode
         prompt = prompt_map.get(AgentMode.CODING, f"You are {role}.")
     return prompt
 
 
-# Context agents -- which prior agents' output each agent should see
+# Stage-level prompt maps — named agents use these based on their stage
+_STAGE_PROMPT_MAPS: dict[str, dict[AgentMode, str]] = {
+    "orchestrator": ORCHESTRATOR_PROMPTS,
+    "thinker": THINKER_PROMPTS,
+    "planner": PLANNER_PROMPTS,
+    "executor": EXECUTOR_PROMPTS,
+    "reviewer": REVIEWER_PROMPTS,
+}
+
+
+# ---------------------------------------------------------------------------
+# Synthesis prompts — used to combine parallel agent outputs into one
+# ---------------------------------------------------------------------------
+
+SYNTHESIS_PROMPT = """You have received perspectives from multiple team members on the same task.
+Your job is to synthesize their outputs into a single, unified response that:
+1. Captures the strongest points from each perspective
+2. Resolves any contradictions by choosing the better-reasoned position
+3. Produces ONE coherent output that downstream agents can work from
+
+The individual perspectives are shown below. Produce a single synthesized output.
+Do NOT mention the synthesis process — just produce the final combined result."""
+
+HANDOFF_FORMAT = """
+At the end of your output, include this handoff block:
+
+---HANDOFF---
+status: pass
+flags: [list any decisions made under ambiguity or unresolved risks]
+---END_HANDOFF---
+
+If you CANNOT complete this stage (missing info, blocked, unclear requirements), use:
+
+---HANDOFF---
+status: blocked
+flags: [what is blocking you]
+questions_for_user: [specific questions that need answers before proceeding]
+---END_HANDOFF---
+"""
+
+
+# ---------------------------------------------------------------------------
+# Re-loop targets — where to go back when a stage is blocked
+# ---------------------------------------------------------------------------
+
+RELOOP_TARGETS: dict[str, str] = {
+    "reviewer": "executor",
+    "executor": "planner",
+    "planner": "thinker",
+    "thinker": "orchestrator",
+}
+
+
+# Context agents -- which prior agents' output each agent should see (legacy)
 CONTEXT_AGENTS: dict[str, list[str]] = {
     "ORCHESTRATOR": [],
     "THINKER": ["ORCHESTRATOR"],
     "PLANNER": ["ORCHESTRATOR", "THINKER", "CHALLENGER"],
     "EXECUTOR": ["ORCHESTRATOR", "PLANNER"],
     "REVIEWER": ["ORCHESTRATOR", "PLANNER", "EXECUTOR"],
+}
+
+# Stage-level context — what synthesized outputs each stage sees from prior stages
+STAGE_CONTEXT: dict[str, list[str]] = {
+    "orchestrator": [],
+    "thinker": ["STAGE_ORCHESTRATOR"],
+    "planner": ["STAGE_ORCHESTRATOR", "STAGE_THINKER"],
+    "executor": ["STAGE_ORCHESTRATOR", "STAGE_PLANNER"],
+    "reviewer": ["STAGE_ORCHESTRATOR", "STAGE_PLANNER", "STAGE_EXECUTOR"],
 }

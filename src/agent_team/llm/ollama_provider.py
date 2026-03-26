@@ -66,6 +66,7 @@ class OllamaProvider(LLMProvider):
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
+        display_name: str = "",
     ) -> str:
         model = self._active_model
         full_response = ""
@@ -82,13 +83,16 @@ class OllamaProvider(LLMProvider):
                 "top_p": 0.9,
             },
         }
-        await ws.send_json({
+        start_msg: dict = {
             "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
             "provider": "ollama",
-        })
+        }
+        if display_name:
+            start_msg["display_name"] = display_name
+        await ws.send_json(start_msg)
         agent_stats = TokenStats()
         try:
             client = await _get_client()

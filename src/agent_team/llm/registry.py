@@ -83,6 +83,7 @@ async def stream_llm(
     agent_color: str = "#ffffff",
     temperature: float = 0.3,
     token_tracker: SessionTokenTracker | None = None,
+    display_name: str = "",
 ) -> str:
     """Stream via the active provider."""
     return await get_provider().stream(
@@ -93,6 +94,7 @@ async def stream_llm(
         agent_color=agent_color,
         temperature=temperature,
         token_tracker=token_tracker,
+        display_name=display_name,
     )
 
 

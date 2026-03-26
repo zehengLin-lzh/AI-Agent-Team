@@ -15,6 +15,7 @@ REASONING_MODEL = THINKING_MODEL    # Thinker/planner/reviewer — logical analy
 CODING_MODEL = THINKING_MODEL        # Executor — use reasoning model for stronger code output
 
 MODEL_ROUTING: dict[str, str | None] = {
+    # Legacy agents
     "ORCHESTRATOR": FAST_MODEL,
     "THINKER": REASONING_MODEL,
     "CHALLENGER": REASONING_MODEL,
@@ -24,6 +25,19 @@ MODEL_ROUTING: dict[str, str | None] = {
     "REVIEWER": REASONING_MODEL,
     "chat": FAST_MODEL,
     "ask": FAST_MODEL,
+    # Named agents (12-agent pipeline)
+    "ORCH_LUMUSI": FAST_MODEL,
+    "ORCH_IVOR": FAST_MODEL,
+    "THINK_SOREN": REASONING_MODEL,
+    "THINK_MIKA": REASONING_MODEL,
+    "THINK_VERA": REASONING_MODEL,
+    "PLAN_ATLAS": REASONING_MODEL,
+    "PLAN_NORA": REASONING_MODEL,
+    "EXEC_KAI": CODING_MODEL,
+    "EXEC_DEV": CODING_MODEL,
+    "EXEC_SAGE": CODING_MODEL,
+    "REV_QUINN": REASONING_MODEL,
+    "REV_LENA": REASONING_MODEL,
 }
 
 # ── Scan security ───────────────────────────────────────────────────────────
@@ -36,6 +50,17 @@ SIMPLE_MODEL_ROUTING: dict[str, str] = {
     "PLANNER": FAST_MODEL,
     "EXECUTOR": FAST_MODEL,
     "REVIEWER": FAST_MODEL,
+}
+
+# ── Medium-task model routing (secondary agents use fast model) ────────────
+MEDIUM_MODEL_ROUTING: dict[str, str] = {
+    "ORCH_LUMUSI": FAST_MODEL,
+    "ORCH_IVOR": FAST_MODEL,
+    "THINK_SOREN": REASONING_MODEL,
+    "PLAN_ATLAS": REASONING_MODEL,
+    "EXEC_KAI": CODING_MODEL,
+    "REV_QUINN": REASONING_MODEL,
+    "REV_LENA": FAST_MODEL,   # lighter review for medium tasks
 }
 
 MAX_FIX_LOOPS = 3
