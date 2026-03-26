@@ -445,35 +445,18 @@ def render_token_summary(summary: dict | None = None):
 
 
 def render_agent_header(agent_name: str, model: str = "", display_name: str = ""):
-    """Show a styled agent header."""
-    icon = AGENT_ICONS.get(agent_name, "\u2022")
+    """Show a styled agent header — Claude Code style with ╭─ prefix."""
     style_name = f"agent.{agent_name.lower()}"
     label = display_name or agent_name
     model_tag = f" [dim]({model})[/]" if model else ""
     console.print()
-    console.print(Rule(
-        f"[{style_name}]{icon} {label}[/]{model_tag}",
-        style=style_name.replace("agent.", ""),
-    ))
+    console.print(f"[{style_name}]╭─ {label}[/]{model_tag}")
 
 
 def render_phase_header(phase: str, label: str):
-    """Show phase transition."""
-    phase_icons = {
-        "intake": "\U0001f4e5",   # 📥
-        "think": "\U0001f914",    # 🤔
-        "debate": "\u2694\ufe0f", # ⚔️
-        "plan": "\U0001f4cb",     # 📋
-        "execute": "\u2699\ufe0f",  # ⚙️
-        "verify": "\u2705",       # ✅
-    }
-    icon = phase_icons.get(phase, "\u25b6")
+    """Show phase transition — slim divider line."""
     console.print()
-    console.print(Panel(
-        f"[bold]{icon} {label}[/]",
-        border_style="blue",
-        padding=(0, 2),
-    ))
+    console.print(Rule(f"[dim]{label}[/]", style="dim"))
 
 
 _EXT_TO_LANG = {
@@ -588,6 +571,7 @@ async def stream_conversation(
 
             current_buffer = ""
             current_agent = None
+            at_line_start = True  # Track gutter state for │ prefix
 
             async for raw in ws:
                 msg = json.loads(raw)
@@ -603,53 +587,54 @@ async def stream_conversation(
                     model = msg.get("model", state.model)
                     display_name = msg.get("display_name", "")
                     current_buffer = ""
+                    at_line_start = True
                     render_agent_header(current_agent, model, display_name=display_name)
 
                 elif t == "token":
                     token = msg.get("content", "")
-                    sys.stdout.write(token)
+                    # Stream with left gutter (│) for Claude Code-style output
+                    for ch in token:
+                        if at_line_start:
+                            sys.stdout.write("\033[2m│\033[0m ")
+                            at_line_start = False
+                        sys.stdout.write(ch)
+                        if ch == "\n":
+                            at_line_start = True
                     sys.stdout.flush()
                     current_buffer += token
 
                 elif t == "agent_done":
                     if current_buffer:
-                        sys.stdout.write("\n")
+                        if not current_buffer.endswith("\n"):
+                            sys.stdout.write("\n")
                         sys.stdout.flush()
-                    # Show per-agent token stats
+                    # Close the agent box with ╰─ and compact stats
                     ts = msg.get("token_stats")
                     if ts and ts.get("total_tokens", 0) > 0:
                         console.print(
-                            f"[token]  \u2514\u2500 tokens: {ts['prompt_tokens']} prompt + "
-                            f"{ts['completion_tokens']} completion = {ts['total_tokens']} total "
+                            f"[dim]╰─ {ts['total_tokens']} tokens "
                             f"({ts.get('tokens_per_second', 0):.1f} t/s)[/]"
                         )
+                    else:
+                        console.print("[dim]╰─[/]")
                     current_agent = None
+                    at_line_start = True
 
                 elif t == "memory_context":
                     results = msg.get("results", [])
                     if results:
                         console.print()
-                        console.print(Panel(
-                            "\n".join(
-                                f"[dim]\u2022 [{r.get('source', '?')}] {r.get('content', '')[:120]}...[/]"
-                                for r in results[:3]
-                            ),
-                            title="[bold blue]\U0001f4da Memory Context[/]",
-                            border_style="blue",
-                        ))
+                        console.print("[dim]memory:[/]")
+                        for r in results[:3]:
+                            console.print(f"[dim]  \u2022 [{r.get('source', '?')}] {r.get('content', '')[:100]}[/]")
 
                 elif t == "tool_results":
                     tools_executed = msg.get("tools_executed", [])
                     if tools_executed:
-                        lines = []
+                        console.print()
                         for tr in tools_executed:
                             icon = "[green]\u2714[/]" if not tr.get("is_error") else "[red]\u2716[/]"
-                            lines.append(f"  {icon} {tr['tool']}: {tr['result'][:80]}")
-                        console.print(Panel(
-                            "\n".join(lines),
-                            title="[bold]\U0001f527 MCP Tool Results[/]",
-                            border_style="green",
-                        ))
+                            console.print(f"  {icon} {tr['tool']}: [dim]{tr['result'][:80]}[/]")
 
                 elif t == "agent_output":
                     agent = msg.get("agent", "")
@@ -671,23 +656,21 @@ async def stream_conversation(
                 elif t == "waiting_for_user":
                     question = msg.get("question", "")
                     console.print()
-                    console.print(Panel(
-                        f"[bold yellow]{question}[/]",
-                        title="[bold]\u2753 Agent needs your input[/]",
-                        border_style="yellow",
-                    ))
+                    console.print(f"[bold yellow]? {question}[/]")
                     # Run input() in a thread so the event loop stays alive
                     # for WebSocket ping/pong (prevents keepalive timeout)
-                    user_reply = (await asyncio.to_thread(input, "\n  Your answer: ")).strip()
+                    user_reply = (await asyncio.to_thread(input, "  > ")).strip()
                     await ws.send(json.dumps({"content": user_reply}))
 
                 elif t == "complete":
                     token_summary = msg.get("token_summary")
                     model_used = msg.get("model", state.model)
+                    total = token_summary.get("total", 0) if token_summary else 0
+                    total_str = f", {total} tokens" if total else ""
                     console.print()
-                    console.print(Panel(
-                        f"[bold green]\u2714 Task complete[/]  |  Model: [accent]{model_used}[/]",
-                        border_style="green",
+                    console.print(Rule(
+                        f"[bold green]done[/] [dim]({model_used}{total_str})[/]",
+                        style="green",
                     ))
                     if token_summary:
                         state.session_tokens = token_summary

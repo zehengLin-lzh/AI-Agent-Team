@@ -2,6 +2,32 @@
 
 ---
 
+## v6.1.0 — Claude Code-Style CLI + Plan-Execute Fix (2026-03-26)
+
+### Summary
+
+CLI redesigned to match Claude Code's clean aesthetic. Fixed plan_only mode running REVIEWER unnecessarily, and reuse_plan now uses named agents for MEDIUM/COMPLEX tasks.
+
+### CLI Redesign
+- **Agent headers**: `╭─ Lumusi (model)` with colored name, no emoji icons
+- **Left gutter**: `│` prefix on every line of agent output (like Claude Code thinking blocks)
+- **Agent footer**: `╰─ 1183 tokens (25.3 t/s)` closes the box
+- **Phase headers**: Slim `Rule` dividers instead of bordered Panels with emoji
+- **Completion**: Clean `── done ──` rule instead of green Panel
+- **User input**: Compact `? question` format instead of bordered Panel
+- **Memory/tools**: Inline text instead of panels
+
+### Plan-Execute Fix
+- **plan_only mode**: Now filters both EXECUTOR and REVIEWER stages (was only filtering EXECUTOR)
+- **reuse_plan**: Uses named agents (EXEC_KAI, REV_QUINN) for MEDIUM/COMPLEX instead of always using legacy EXECUTOR/REVIEWER
+
+### Files Modified
+- `cli/interactive.py` — Full rendering overhaul (headers, gutter, stats, panels → rules)
+- `agents/runner.py` — plan_only filter includes REVIEWER, reuse_plan uses correct phase order
+- `agents/http_runner.py` — Same plan_only filter fix
+
+---
+
 ## v6.0.0 — 12-Agent Collaborative Pipeline (2026-03-26)
 
 ### Summary

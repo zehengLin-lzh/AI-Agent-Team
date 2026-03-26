@@ -630,28 +630,36 @@ class AgentTeam:
                 else:
                     self.memory_context = self.session_context
 
+            # Select phase order based on complexity
+            if self.complexity == TaskComplexity.SIMPLE:
+                full_phase_order = list(SIMPLE_PHASE_ORDER.get(
+                    self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
+                ))
+            elif self.complexity == TaskComplexity.MEDIUM:
+                full_phase_order = list(MEDIUM_PHASE_ORDER.get(
+                    self.mode, MEDIUM_PHASE_ORDER[AgentMode.CODING]
+                ))
+            else:  # COMPLEX
+                full_phase_order = list(COMPLEX_PHASE_ORDER.get(
+                    self.mode, COMPLEX_PHASE_ORDER[AgentMode.CODING]
+                ))
+
             # A5: If reusing a prior plan, inject outputs and skip to EXECUTOR+REVIEWER
+            _exec_rev_ids = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE",
+                             "REVIEWER", "REV_QUINN", "REV_LENA"}
             if self.reuse_plan and self.prior_phase_outputs:
                 self.phase_outputs.update(self.prior_phase_outputs)
-                phase_order = [["EXECUTOR"], ["REVIEWER"]]
+                # Use executor+reviewer stages from the correct phase order
+                phase_order = [g for g in full_phase_order
+                               if _exec_rev_ids.intersection(g)]
+                if not phase_order:
+                    phase_order = [["EXECUTOR"], ["REVIEWER"]]
+            elif self.plan_only:
+                # A1: Skip EXECUTOR and REVIEWER when plan_only
+                phase_order = [g for g in full_phase_order
+                               if not _exec_rev_ids.intersection(g)]
             else:
-                # Select phase order based on complexity
-                if self.complexity == TaskComplexity.SIMPLE:
-                    phase_order = list(SIMPLE_PHASE_ORDER.get(
-                        self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
-                    ))
-                elif self.complexity == TaskComplexity.MEDIUM:
-                    phase_order = list(MEDIUM_PHASE_ORDER.get(
-                        self.mode, MEDIUM_PHASE_ORDER[AgentMode.CODING]
-                    ))
-                else:  # COMPLEX
-                    phase_order = list(COMPLEX_PHASE_ORDER.get(
-                        self.mode, COMPLEX_PHASE_ORDER[AgentMode.CODING]
-                    ))
-                # A1: Skip EXECUTOR phases when plan_only
-                if self.plan_only:
-                    exec_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE"}
-                    phase_order = [g for g in phase_order if not exec_stages.intersection(g)]
+                phase_order = full_phase_order
 
             # Log complexity classification to CLI
             await self.ws.send_json({

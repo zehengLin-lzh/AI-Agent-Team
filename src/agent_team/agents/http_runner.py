@@ -207,10 +207,11 @@ async def run_team_http(
     fix_count = 0
     file_changes_data: list[dict] = []
 
-    exec_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE"}
+    _skip_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE",
+                    "REVIEWER", "REV_QUINN", "REV_LENA"}
 
     for phase_group in phase_order:
-        if mode == AskMode.PLAN_ONLY and exec_stages.intersection(phase_group):
+        if mode == AskMode.PLAN_ONLY and _skip_stages.intersection(phase_group):
             continue
 
         is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
