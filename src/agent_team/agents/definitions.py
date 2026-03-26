@@ -1163,6 +1163,15 @@ def get_agent_prompt(role: str, mode: AgentMode, complexity: str = "medium") -> 
         stage_prompts = _STAGE_PROMPT_MAPS.get(spec.stage, {})
         base = stage_prompts.get(mode) or stage_prompts.get(AgentMode.CODING, "")
         if base:
+            # Replace generic role labels with the agent's persona name
+            # e.g. "You are ORCHESTRATOR" → "You are Lumusi (Sr. Engineering Manager)"
+            #      "[ORCHESTRATOR]" → "[Lumusi]"
+            role_upper = spec.stage.upper()  # ORCHESTRATOR, THINKER, etc.
+            base = base.replace(
+                f"You are {role_upper}",
+                f"You are {spec.name} ({spec.role})",
+            )
+            base = base.replace(f"[{role_upper}]", f"[{spec.name}]")
             return f"Your name is {spec.name}. {spec.persona}\n\n{base}"
         return f"Your name is {spec.name}. {spec.persona}"
 

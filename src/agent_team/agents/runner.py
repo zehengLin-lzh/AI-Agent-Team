@@ -209,7 +209,14 @@ class AgentTeam:
         return "unknown"
 
     async def run_stage(self, agent_ids: list[str], stage_name: str) -> dict[str, str]:
-        """Run a pipeline stage with 1+ agents. Handles parallel execution and synthesis."""
+        """Run a pipeline stage with 1+ agents.
+
+        Sequential discussion model:
+        - Agent 1 runs first and produces output
+        - Agent 2+ each run with Agent 1's output as "colleague's analysis"
+        - If 2+ agents: lead agent synthesizes all perspectives into one output
+        This ensures each agent gets its own clear section in the CLI.
+        """
         phase_label = {
             "orchestrator": "Understanding your request",
             "thinker": "Deep analysis",
@@ -217,19 +224,44 @@ class AgentTeam:
             "executor": "Producing output",
             "reviewer": "Quality review",
         }.get(stage_name, stage_name.title())
-        await self.send_status(f"{phase_label} ({', '.join(AGENT_REGISTRY_MAP[a].name for a in agent_ids if a in AGENT_REGISTRY_MAP)})...", stage_name)
+        agent_names = ', '.join(
+            AGENT_REGISTRY_MAP[a].name for a in agent_ids if a in AGENT_REGISTRY_MAP
+        )
+        await self.send_status(f"{phase_label} ({agent_names})...", stage_name)
 
         if len(agent_ids) == 1:
             output = await self.run_agent(agent_ids[0])
             self.phase_outputs[f"STAGE_{stage_name.upper()}"] = output
             return {agent_ids[0]: output}
 
-        # Parallel execution
-        tasks = [self.run_agent(aid) for aid in agent_ids]
-        results = await asyncio.gather(*tasks)
-        outputs = dict(zip(agent_ids, results))
+        # Sequential discussion: each agent sees the previous agents' outputs
+        outputs: dict[str, str] = {}
+        for i, aid in enumerate(agent_ids):
+            if i == 0:
+                # First agent runs without colleague context
+                output = await self.run_agent(aid)
+            else:
+                # Subsequent agents receive all prior outputs as colleague context
+                colleague_text = "\n\n---\n\n".join(
+                    f"[{AGENT_REGISTRY_MAP[prev_id].name}]:\n{prev_out}"
+                    for prev_id, prev_out in outputs.items()
+                )
+                spec = AGENT_REGISTRY_MAP.get(aid)
+                colleague_names = ", ".join(
+                    AGENT_REGISTRY_MAP[pid].name for pid in outputs
+                )
+                output = await self.run_agent(
+                    aid,
+                    extra_instruction=(
+                        f"Your colleague(s) {colleague_names} already analyzed this. "
+                        f"Review their work, add your unique perspective, and note any "
+                        f"disagreements or gaps.\n\n"
+                        f"Colleague analysis:\n{colleague_text}"
+                    ),
+                )
+            outputs[aid] = output
 
-        # Synthesis: re-invoke the first agent to combine perspectives
+        # Synthesis: lead agent combines all perspectives into one canonical output
         synth = await self._synthesize_stage(agent_ids[0], outputs, stage_name)
         self.phase_outputs[f"STAGE_{stage_name.upper()}"] = synth
         return outputs
@@ -290,7 +322,19 @@ class AgentTeam:
         stage_key = f"STAGE_{stage_name.upper()}"
         output = self.phase_outputs.get(stage_key, "")
         handoff = self._parse_handoff(output)
-        if not handoff or handoff["status"] == "pass":
+
+        # Always show handoff status in CLI
+        status = handoff["status"] if handoff else "pass"
+        flags = handoff.get("flags", []) if handoff else []
+        flag_text = f" (flags: {', '.join(flags)})" if flags else ""
+        await self.ws.send_json({
+            "type": "status",
+            "phase": "handoff",
+            "message": f"✅ {stage_name.title()} → PASS{flag_text}" if status == "pass"
+                       else f"🚫 {stage_name.title()} → BLOCKED{flag_text}",
+        })
+
+        if not handoff or status == "pass":
             return False
 
         # Blocked — check for user questions

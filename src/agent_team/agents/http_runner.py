@@ -216,16 +216,34 @@ async def run_team_http(
         is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
 
         if is_named and len(phase_group) > 1:
-            # Multi-agent parallel execution + synthesis
-            tasks = [
-                _run_agent_http(
-                    aid, user_plan, phase_outputs, agent_mode,
-                    complexity=complexity.value, patterns_context=patterns_context,
-                )
-                for aid in phase_group
-            ]
-            results = await asyncio.gather(*tasks)
-            outputs = dict(zip(phase_group, results))
+            # Sequential discussion: each agent sees previous agents' output
+            outputs: dict[str, str] = {}
+            for i, aid in enumerate(phase_group):
+                if i == 0:
+                    out = await _run_agent_http(
+                        aid, user_plan, phase_outputs, agent_mode,
+                        complexity=complexity.value, patterns_context=patterns_context,
+                    )
+                else:
+                    colleague_text = "\n\n---\n\n".join(
+                        f"[{AGENT_REGISTRY_MAP[pid].name}]:\n{po}"
+                        for pid, po in outputs.items()
+                    )
+                    colleague_names = ", ".join(
+                        AGENT_REGISTRY_MAP[pid].name for pid in outputs
+                    )
+                    out = await _run_agent_http(
+                        aid, user_plan, phase_outputs, agent_mode,
+                        complexity=complexity.value, patterns_context=patterns_context,
+                        extra_instruction=(
+                            f"Your colleague(s) {colleague_names} already analyzed this. "
+                            f"Review their work, add your unique perspective, and note "
+                            f"any disagreements or gaps.\n\n"
+                            f"Colleague analysis:\n{colleague_text}"
+                        ),
+                    )
+                outputs[aid] = out
+                phase_outputs[aid] = out
 
             # Determine stage name
             stage_name = AGENT_REGISTRY_MAP[phase_group[0]].stage
