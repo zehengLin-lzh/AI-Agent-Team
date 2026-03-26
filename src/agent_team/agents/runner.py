@@ -57,6 +57,83 @@ class AgentTeam:
             "phase": phase,
         })
 
+    async def _auto_discover_schema(self):
+        """Auto-discover database schema via MCP and inject into context.
+
+        Calls db_list_tables to find all tables, then db_describe_table for
+        each one.  The combined schema is prepended to memory_context so all
+        agents know the database structure without asking the user.
+        """
+        await self.send_status("Discovering database schema...", "setup")
+
+        # Detect connection profile: try db_list_tables with no connection
+        # (uses default), then fall back to first available profile name
+        conn_arg: dict = {}
+        # Try to read the default connection from the MCP config
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
+            if cfg_path.exists():
+                cfg = _json.loads(cfg_path.read_text())
+                default_conn = cfg.get("default_connection", "")
+                if default_conn:
+                    conn_arg = {"connection": default_conn}
+                elif cfg.get("profiles"):
+                    first = next(iter(cfg["profiles"]))
+                    conn_arg = {"connection": first}
+        except Exception:
+            pass
+
+        schema_parts: list[str] = []
+        tables_result = await self.mcp_registry.call_tool_by_name(
+            "db_list_tables", conn_arg
+        )
+        if not tables_result or tables_result.is_error:
+            return
+
+        schema_parts.append(f"## Tables\n{tables_result.content}")
+
+        # Extract table names from markdown table — first column only
+        # Format: | table_name | columns | rows |
+        import re as _re
+        # Match first cell after row-starting pipe, skip header/separator rows
+        table_names = []
+        for line in tables_result.content.splitlines():
+            line = line.strip()
+            if not line.startswith("|") or "---" in line:
+                continue
+            cells = [c.strip() for c in line.split("|") if c.strip()]
+            if cells and cells[0].isidentifier() and cells[0].lower() not in (
+                "table", "name", "table_name",
+            ):
+                table_names.append(cells[0])
+        # Skip internal SQLite tables
+        table_names = [t for t in table_names if not t.startswith("sqlite_")]
+
+        for tname in table_names[:10]:
+            desc = await self.mcp_registry.call_tool_by_name(
+                "db_describe_table",
+                {**conn_arg, "table": tname},
+            )
+            if desc and not desc.is_error:
+                schema_parts.append(f"## {tname}\n{desc.content}")
+
+        if schema_parts:
+            schema_ctx = (
+                "Database schema (auto-discovered via MCP):\n\n"
+                + "\n\n".join(schema_parts)
+            )
+            if self.memory_context:
+                self.memory_context = f"{schema_ctx}\n\n{self.memory_context}"
+            else:
+                self.memory_context = schema_ctx
+            await self.ws.send_json({
+                "type": "status",
+                "phase": "setup",
+                "message": f"Schema discovered: {len(table_names)} tables ({', '.join(table_names)})",
+            })
+
     def _swap_model_for_agent(self, agent_name: str) -> tuple[str | None, bool]:
         """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
         if self.complexity == TaskComplexity.SIMPLE:
@@ -594,6 +671,19 @@ class AgentTeam:
                             })
                 except Exception:
                     pass
+
+            # Pre-session: auto-discover database schema via MCP if the request
+            # involves database/SQL queries.  This gives all agents the schema
+            # so small models don't need to ask the user for table names.
+            if self.mcp_registry and self.mcp_tools_prompt:
+                db_keywords = {"database", "sql", "query", "table", "select",
+                               "join", "schema", "column", "prescription",
+                               "patient", "user_id", "patient_id"}
+                if any(kw in user_plan.lower() for kw in db_keywords):
+                    try:
+                        await self._auto_discover_schema()
+                    except Exception:
+                        pass
 
             # Classify task complexity for adaptive routing
             self.complexity = classify_complexity(user_plan, self.mode.value)
