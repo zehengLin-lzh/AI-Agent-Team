@@ -79,10 +79,10 @@ def classify_complexity(user_plan: str, mode: str = "coding") -> TaskComplexity:
     if component_count >= 3:
         return TaskComplexity.MEDIUM
 
-    # Strong SIMPLE signals
-    if word_count < 200 and simple_hits >= 1 and multi_step_hits == 0 and file_refs <= 1:
+    # Strong SIMPLE signals — only truly trivial one-liners (e.g. "fix typo in X")
+    if word_count < 20 and simple_hits >= 2 and multi_step_hits == 0 and file_refs <= 1:
         return TaskComplexity.SIMPLE
-    if word_count < 100 and complex_hits == 0 and multi_step_hits == 0 and component_count <= 1:
+    if word_count < 10 and simple_hits >= 1 and complex_hits == 0 and multi_step_hits == 0 and component_count <= 1:
         return TaskComplexity.SIMPLE
 
     # Default

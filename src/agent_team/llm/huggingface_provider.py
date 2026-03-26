@@ -176,13 +176,16 @@ class HuggingFaceProvider(LLMProvider):
             "stream": True,
         }
 
-        await ws.send_json({
+        start_msg: dict = {
             "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
             "provider": "huggingface",
-        })
+        }
+        if display_name:
+            start_msg["display_name"] = display_name
+        await ws.send_json(start_msg)
 
         agent_stats = TokenStats()
         start_time = time.monotonic_ns()

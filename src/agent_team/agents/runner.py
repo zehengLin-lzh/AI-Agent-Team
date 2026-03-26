@@ -609,6 +609,13 @@ class AgentTeam:
                     exec_stages = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE"}
                     phase_order = [g for g in phase_order if not exec_stages.intersection(g)]
 
+            # Log complexity classification to CLI
+            await self.ws.send_json({
+                "type": "status",
+                "phase": "complexity",
+                "message": f"Task complexity: {self.complexity.value.upper()} → {len(phase_order)} phases",
+            })
+
             # -- Main pipeline loop --
             _LEGACY_HANDLERS = {
                 "ORCHESTRATOR": self.run_orchestrator,
