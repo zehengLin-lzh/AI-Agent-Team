@@ -75,7 +75,7 @@ async def execute_tool_calls(text: str, registry) -> tuple[str, list[dict]]:
         execution_log.append({
             "tool": call.tool_name,
             "arguments": call.arguments,
-            "result": result.content[:500],
+            "result": result.content[:3000],
             "is_error": result.is_error,
         })
 

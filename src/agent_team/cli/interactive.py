@@ -149,6 +149,7 @@ class CLIState:
     skill_registry: object | None = None  # SkillRegistry instance
     session: SessionContext = field(default_factory=SessionContext)
     user_cwd: str = field(default_factory=_get_user_cwd)  # Where the user launched from
+    mcp_data_returned: bool = False  # Set True when MCP tools return data (skip execute prompt)
 
 state = CLIState()
 
@@ -633,8 +634,35 @@ async def stream_conversation(
                     if tools_executed:
                         console.print()
                         for tr in tools_executed:
-                            icon = "[green]\u2714[/]" if not tr.get("is_error") else "[red]\u2716[/]"
-                            console.print(f"  {icon} {tr['tool']}: [dim]{tr['result'][:80]}[/]")
+                            icon = "[green]✔[/]" if not tr.get("is_error") else "[red]✖[/]"
+                            tool_name = tr["tool"]
+                            result_text = tr.get("result", "")
+                            args = tr.get("arguments", {})
+                            args_short = ", ".join(f"{k}={v}" for k, v in args.items())[:60]
+                            console.print(f"  {icon} [bold]{tool_name}[/]({args_short})")
+                            # Show full result for query tools
+                            if result_text and not tr.get("is_error"):
+                                from rich.panel import Panel
+                                from rich.syntax import Syntax
+                                # If result looks like a markdown table, show it nicely
+                                if "|" in result_text and "---" in result_text:
+                                    console.print(Panel(
+                                        result_text.strip(),
+                                        title=f"[bold green]{tool_name}[/]",
+                                        border_style="green",
+                                        expand=False,
+                                    ))
+                                else:
+                                    console.print(Panel(
+                                        result_text.strip()[:2000],
+                                        title=f"[bold green]{tool_name}[/]",
+                                        border_style="dim",
+                                        expand=False,
+                                    ))
+                            elif tr.get("is_error"):
+                                console.print(f"    [red]{result_text[:200]}[/]")
+                        # Track that MCP tools returned data
+                        state.mcp_data_returned = True
 
                 elif t == "agent_output":
                     agent = msg.get("agent", "")
@@ -1966,11 +1994,15 @@ async def main():
             await check_tool_triggers(user_input)
 
             # Default: plan-only first
+            state.mcp_data_returned = False  # Reset before each run
             _, plan_outputs = await stream_conversation(user_input, detected_mode, plan_only=True)
             state.conversation_count += 1
 
+            # If MCP tools already returned data (e.g. query results), skip execute prompt
+            if state.mcp_data_returned:
+                console.print("[dim]MCP tools returned data — no execution needed.[/]")
             # For coding/execution modes, offer to execute after planning
-            if detected_mode in ("coding", "execution"):
+            elif detected_mode in ("coding", "execution"):
                 # A3: Auto-detect path from user input
                 detected_path = extract_path_from_text(user_input)
                 if detected_path:
