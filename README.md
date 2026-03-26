@@ -135,15 +135,43 @@ Starts:
 
 ## Agent Pipeline
 
+Tasks are automatically classified by complexity (simple/medium/complex) and routed to the appropriate pipeline tier.
+
+### Simple Tasks (4 LLM calls)
+Legacy single-agent pipeline for quick, focused tasks.
+
 | Phase | Agent | Role |
 |---|---|---|
 | 01 Intake | ORCHESTRATOR | Parse request, ask clarifying questions |
-| 02 Think | THINKER | Deep analysis, feasibility, risk assessment |
-| 02b Debate | CHALLENGER | Challenge THINKER's analysis, find gaps |
-| 02c Refine | THINKER (refined) | Respond to challenges, produce refined analysis |
-| 03 Plan | PLANNER | Execution plan, file tree, API contracts |
-| 04 Execute | EXECUTOR | Write code, generate documentation |
-| 05 Verify | REVIEWER | Quality review, tests, fix loops (up to 3) |
+| 02 Plan | PLANNER | Execution plan, file tree |
+| 03 Execute | EXECUTOR | Write code, generate output |
+| 04 Verify | REVIEWER | Quality review, fix loops (up to 3) |
+
+### Medium Tasks (7 LLM calls)
+Dual orchestrator + reviewer with named agents.
+
+| Phase | Agents | Role |
+|---|---|---|
+| 01 Intake | Lumusi → Ivor | Engineering manager + product manager discuss the task |
+| 02 Think | Soren | Systems architect — deep analysis |
+| 03 Plan | Atlas | Project lead — execution plan |
+| 04 Execute | Kai | Senior implementer — write code |
+| 05 Review | Quinn → Lena | QA lead + user advocate review quality |
+
+### Complex Tasks (10+ LLM calls)
+Full 12-agent pipeline with parallel groups and synthesis.
+
+| Phase | Agents | Role |
+|---|---|---|
+| 01 Intake | Lumusi → Ivor | Dual orchestrator with discussion + synthesis |
+| 02 Think | Soren → Mika | Architect + domain expert analysis |
+| 02b Challenge | Vera | Devil's advocate — find gaps and risks |
+| 03 Plan | Atlas → Nora | Project lead + dependency mapper |
+| 04 Execute | Kai → Dev | Implementer + artifact builder |
+| 04b Integrate | Sage | Integration specialist — merge outputs |
+| 05 Review | Quinn → Lena | QA lead + user advocate |
+
+Each multi-agent stage uses **sequential discussion**: Agent 1 produces output, Agent 2 reviews it and adds their perspective, then the lead agent synthesizes both into a single canonical output for downstream stages. Stages communicate via structured `---HANDOFF---` blocks with pass/blocked status.
 
 ---
 
@@ -371,10 +399,10 @@ git init && git add -A && git commit -m "Initial commit"
 **Zip:**
 ```bash
 # .gitignore is respected — runtime data, venv, caches excluded
-zip -r agent-team.zip . -x '.venv/*' '__pycache__/*' 'data/*' 'plans/*' '.idea/*' '.DS_Store'
+zip -r agent-team.zip . -x '.venv/*' '__pycache__/*' 'data/*' 'plans/*' '.idea/*' '.DS_Store' 'mcp.json'
 ```
 
-The `.gitignore` excludes: `.venv/`, `__pycache__/`, `data/` (runtime SQLite + sessions), `plans/` (generated plans), `.idea/`, `.DS_Store`, and secrets.
+The `.gitignore` excludes: `.venv/`, `__pycache__/`, `data/` (runtime SQLite + sessions), `plans/` (generated plans), `mcp.json` (user-specific MCP config), `.idea/`, `.DS_Store`, and secrets.
 
 Recipients just run:
 ```bash
