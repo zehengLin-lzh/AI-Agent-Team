@@ -303,17 +303,37 @@ async def switch_model_remote(model_name: str) -> dict:
 # ── UI Components ────────────────────────────────────────────────────────────
 
 def render_banner():
-    """Show startup banner with status info inside the box."""
-    banner_text = Text()
-    banner_text.append("  __  __         _        _                    _     _____                    \n", style="bold cyan")
-    banner_text.append(" |  \\/  |  __ _ | |_     / \\    __ _  ___ _ __| |_  |_   _|___  __ _ _ __ ___ \n", style="bold cyan")
-    banner_text.append(" | |\\/| | / _` || __|   / _ \\  / _` |/ _ \\ '_ \\ __|   | | / _ \\/ _` | '_ ` _ \\\n", style="bold cyan")
-    banner_text.append(" | |  | || (_| || |_   / ___ \\| (_| |  __/ | | | |_    | ||  __/ (_| | | | | | |\n", style="bold blue")
-    banner_text.append(" |_|  |_| \\__,_| \\__| /_/   \\_\\\\__, |\\___|_| |_|\\__|   |_| \\___|\\__,_|_| |_| |_|\n", style="bold blue")
-    banner_text.append("                                |___/                                           ", style="bold magenta")
+    """Show startup banner (ASCII art only, no status)."""
+    # Just store the banner — actual rendering happens in render_startup_box()
+    pass
+
+
+def render_startup_box():
+    """Render a single unified startup box with banner + status, like Claude Code."""
+    conn_icon = "[green]\u25cf[/]" if state.backend_connected else "[red]\u25cf[/]"
+    conn_text = "Connected" if state.backend_connected else "Disconnected"
+    cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
+
+    # Build all content as one Text object — use no_wrap to prevent line wrapping
+    content = Text(no_wrap=True, overflow="ellipsis")
+    content.append(" __  __       _       _                  _   _____\n", style="bold cyan")
+    content.append("|  \\/  | __ _| |_    / \\   __ _  ___ _ _| |_|_   _|__ __ _ _ __\n", style="bold cyan")
+    content.append("| |\\/| |/ _` |  _|  / _ \\ / _` |/ -_) ' \\  _| | |/ -_) _` | '  \\\n", style="bold cyan")
+    content.append("|_|  |_|\\__,_|\\__| /_/ \\_\\\\__, |\\___|_||_\\__| |_|\\___|\\__,_|_|_|_|\n", style="bold blue")
+    content.append("                         |___/\n", style="bold magenta")
+
+    # Status line appended inside the panel
+    from rich.console import Group
+    status_line = Text.from_markup(
+        f" {conn_icon} {conn_text} [dim]\u00b7[/] "
+        f"[accent]{state.llm_provider}[/] [dim]\u00b7[/] "
+        f"[accent]{state.model}[/] [dim]\u00b7[/] "
+        f"[accent]{state.mode}[/]\n"
+        f" [dim]{cwd_display}[/]"
+    )
 
     console.print(Panel(
-        banner_text,
+        Group(content, status_line),
         title=f"[bold white]{APP_NAME} v{APP_VERSION}[/]",
         subtitle="[dim]Self-learning local AI agent team[/]",
         border_style="cyan",
@@ -322,20 +342,8 @@ def render_banner():
 
 
 def render_status_bar():
-    """Render status info inside a bordered box, matching the banner style."""
-    conn_icon = "[green]\u25cf[/]" if state.backend_connected else "[red]\u25cf[/]"
-    conn_text = "Connected" if state.backend_connected else "Disconnected"
-    cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
-
-    lines = [
-        f"  {conn_icon} {conn_text}  [dim]|[/]  LLM: [accent]{state.llm_provider}[/]  [dim]|[/]  Model: [accent]{state.model}[/]  [dim]|[/]  Mode: [accent]{state.mode}[/]",
-        f"  [dim]Working directory: {cwd_display}[/]",
-    ]
-    console.print(Panel(
-        "\n".join(lines),
-        border_style="dim cyan",
-        padding=(0, 1),
-    ))
+    """Render the unified startup box (called after backend check)."""
+    render_startup_box()
 
 
 def render_help():
@@ -1766,27 +1774,24 @@ async def main():
     """Main interactive CLI loop."""
     # Startup
     console.clear()
-    render_banner()
 
     # Auto-start backend if not running
     backend_was_started = False
     already_running = await _is_backend_running()
     if already_running:
-        console.print(f"[success]\u2714 Backend already running[/] [dim]({BACKEND_URL})[/]")
+        console.print(f"[dim]\u2714 Backend already running[/]")
     else:
         backend_was_started = await start_backend()
 
     # Check backend and populate state
     connected = await check_backend()
-    if connected:
-        console.print(f"[dim]  LLM: {state.llm_provider} | Model: {state.model} | Models available: {len(state.available_models)}[/]")
-    else:
+    if not connected:
         console.print(f"[error]\u2716 Cannot reach backend at {BACKEND_URL}[/]")
         console.print("[warning]Check that dependencies are installed: uv sync[/]")
-        console.print("[dim]Some features may be unavailable.[/]")
 
-    console.print()
-    render_status_bar()
+    # Render the unified startup box (banner + status in one panel)
+    console.clear()
+    render_startup_box()
     console.print()
     console.print("[dim]Type [bold]/help[/bold] for available commands, or just start typing your request.[/]")
     console.print(Rule(style="dim"))
