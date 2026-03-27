@@ -336,6 +336,8 @@ When a database MCP server is connected, the pipeline automatically:
 
 No special prompting needed — just ask natural language questions like "show me all patients with active prescriptions".
 
+**Setup (per machine):** `mcp.json` is gitignored — each machine needs its own copy with correct local paths. Copy `mcp.json.example` to `mcp.json` and update the `local-db` entry with your MCP server path and `DB_CONFIG_PATH`. The pipeline reads `DB_CONFIG_PATH` from `mcp.json` env to find your database connection profile.
+
 ### Keyword Triggers
 
 When your request mentions domains like "database", "git", "web", etc., the CLI automatically suggests relevant MCP servers or skills. Search for servers:

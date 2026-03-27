@@ -31,6 +31,17 @@
       "description": "Fetch and parse web pages",
       "triggers": ["web", "fetch", "http", "url", "scrape"],
       "enabled": false
+    },
+    "local-db": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/your/local-db-mcp", "python", "-m", "local_db_mcp"],
+      "env": {
+        "DB_CONFIG_PATH": "/path/to/your/connections.json"
+      },
+      "description": "Read-only database queries (MySQL, PostgreSQL, SQLite)",
+      "triggers": ["database", "sql", "mysql", "postgres", "sqlite", "query", "table", "select"],
+      "enabled": false
     }
   }
 }

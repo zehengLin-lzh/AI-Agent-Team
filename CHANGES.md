@@ -2,6 +2,25 @@
 
 ---
 
+## v6.2.1 — Portable MCP Config + Error Visibility (2026-03-26)
+
+### Summary
+
+MCP database features now work on any machine. Connection config is read from `mcp.json` env (`DB_CONFIG_PATH`) instead of hardcoded path. Schema discovery and SQL execution failures are now visible in the CLI.
+
+### Changes
+- **Portable config**: `_get_db_connection_args()` reads `DB_CONFIG_PATH` from MCP server env in `mcp.json`, falls back to `~/.config/local-db-mcp/connections.json`
+- **Error visibility**: Schema discovery and SQL execution failures now send status messages to CLI instead of silently returning
+- **mcp.json.example**: Added `local-db` server template with `DB_CONFIG_PATH` env var
+- **README**: Added per-machine MCP setup instructions
+
+### Files Modified
+- `agents/runner.py` — `_get_db_connection_args()`, error status messages
+- `mcp.json.example` — `local-db` template
+- `README.md` — MCP setup note
+
+---
+
 ## v6.2.0 — MCP Auto-Execute + Loading Spinner (2026-03-26)
 
 ### Summary

@@ -57,6 +57,41 @@ class AgentTeam:
             "phase": phase,
         })
 
+    def _get_db_connection_args(self) -> dict:
+        """Read DB connection profile from MCP env config or fallback path.
+
+        Checks sources in order:
+        1. DB_CONFIG_PATH env var from any MCP server definition in mcp.json
+        2. ~/.config/local-db-mcp/connections.json (legacy fallback)
+        3. Empty dict (let MCP server use its default connection)
+        """
+        from pathlib import Path as _Path
+        import json as _json
+
+        cfg_path = None
+        # 1) Read DB_CONFIG_PATH from MCP server env
+        if self.mcp_registry:
+            for srv in self.mcp_registry.config.servers.values():
+                env_path = srv.env.get("DB_CONFIG_PATH")
+                if env_path:
+                    cfg_path = _Path(env_path).expanduser()
+                    break
+        # 2) Fallback to well-known location
+        if cfg_path is None:
+            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
+
+        try:
+            if cfg_path and cfg_path.exists():
+                cfg = _json.loads(cfg_path.read_text())
+                conn = cfg.get("default_connection", "")
+                if not conn and cfg.get("profiles"):
+                    conn = next(iter(cfg["profiles"]))
+                if conn:
+                    return {"connection": conn}
+        except Exception:
+            pass
+        return {}
+
     async def _auto_discover_schema(self):
         """Auto-discover database schema via MCP and inject into context.
 
@@ -66,30 +101,15 @@ class AgentTeam:
         """
         await self.send_status("Discovering database schema...", "setup")
 
-        # Detect connection profile: try db_list_tables with no connection
-        # (uses default), then fall back to first available profile name
-        conn_arg: dict = {}
-        # Try to read the default connection from the MCP config
-        try:
-            import json as _json
-            from pathlib import Path as _Path
-            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
-            if cfg_path.exists():
-                cfg = _json.loads(cfg_path.read_text())
-                default_conn = cfg.get("default_connection", "")
-                if default_conn:
-                    conn_arg = {"connection": default_conn}
-                elif cfg.get("profiles"):
-                    first = next(iter(cfg["profiles"]))
-                    conn_arg = {"connection": first}
-        except Exception:
-            pass
+        conn_arg = self._get_db_connection_args()
 
         schema_parts: list[str] = []
         tables_result = await self.mcp_registry.call_tool_by_name(
             "db_list_tables", conn_arg
         )
         if not tables_result or tables_result.is_error:
+            err_msg = tables_result.content if tables_result else "No response"
+            await self.send_status(f"Schema discovery failed: {err_msg}", "setup")
             return
 
         schema_parts.append(f"## Tables\n{tables_result.content}")
@@ -183,19 +203,8 @@ class AgentTeam:
         if not sql_blocks:
             return
 
-        # Detect connection profile
-        conn_name = ""
-        try:
-            import json as _json
-            from pathlib import Path as _Path
-            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
-            if cfg_path.exists():
-                cfg = _json.loads(cfg_path.read_text())
-                conn_name = cfg.get("default_connection", "")
-                if not conn_name and cfg.get("profiles"):
-                    conn_name = next(iter(cfg["profiles"]))
-        except Exception:
-            pass
+        # Detect connection profile (portable: reads from mcp.json env first)
+        conn_args = self._get_db_connection_args()
 
         await self.send_status("Executing SQL queries...", "query")
         exec_log = []
@@ -205,13 +214,11 @@ class AgentTeam:
             if not sql:
                 continue
             try:
-                args = {"sql": sql}
-                if conn_name:
-                    args["connection"] = conn_name
+                args = {"sql": sql, **conn_args}
                 result = await self.mcp_registry.call_tool_by_name("db_query", args)
                 exec_log.append({
                     "tool": "db_query",
-                    "arguments": {"sql": sql[:100], "connection": conn_name},
+                    "arguments": {"sql": sql[:100], **conn_args},
                     "result": result.content[:3000] if result else "",
                     "is_error": result.is_error if result else True,
                 })
