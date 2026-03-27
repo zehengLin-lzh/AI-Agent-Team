@@ -204,6 +204,8 @@ Each version improved the agent team's output quality, measured against frontier
 | **v4.0** | — | — | Pipeline fixes, plan reuse, 3-tier model routing, scan security, path auto-detect, file traceability |
 | **v5.0** | 85/100 | 3 pts | Task complexity routing, color-coded file diffs, autonomous error learning |
 | **v6.0** | — | — | 12-agent collaborative pipeline, sequential discussion, stage synthesis, structured handoffs |
+| **v6.1** | — | — | Claude Code-style CLI redesign, plan-execute fix |
+| **v6.2** | — | — | MCP auto-execute SQL, auto schema discovery, loading spinner, multi-pattern SQL extraction |
 
 For detailed changelogs per version, see [CHANGES.md](CHANGES.md).
 
@@ -322,6 +324,17 @@ cp mcp.json.example mcp.json
   }
 }
 ```
+
+### Auto-Execute Database Queries
+
+When a database MCP server is connected, the pipeline automatically:
+1. **Discovers schema** — calls `db_list_tables` and `db_describe_table` before the pipeline starts
+2. **Injects context** — agents see full table/column definitions in their prompts
+3. **Extracts SQL** — parses SQL from planner output (supports multiple formats)
+4. **Executes queries** — runs SQL via MCP `db_query` and displays results inline
+5. **Skips confirmation** — bypasses "Execute this plan?" when data is already returned
+
+No special prompting needed — just ask natural language questions like "show me all patients with active prescriptions".
 
 ### Keyword Triggers
 

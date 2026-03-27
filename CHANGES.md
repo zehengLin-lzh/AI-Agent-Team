@@ -2,6 +2,37 @@
 
 ---
 
+## v6.2.0 — MCP Auto-Execute + Loading Spinner (2026-03-26)
+
+### Summary
+
+Database queries now auto-execute via MCP — the pipeline pre-fetches schema, extracts SQL from planner output, and returns results directly without manual confirmation. Added animated loading spinner during agent thinking states.
+
+### MCP Database Integration
+- **Auto schema discovery**: Pre-pipeline `db_list_tables` + `db_describe_table` calls inject full schema into agent context
+- **Auto SQL execution**: Extracts SQL from planner output and executes via MCP `db_query`, results shown inline
+- **Multi-pattern SQL extraction**: Handles `\`\`\`sql` blocks, `sql="SELECT..."` in Python, bare SELECT statements, and backtick-quoted SQL
+- **Skip execute prompt**: When MCP returns data, bypasses "Execute this plan?" confirmation
+
+### CLI Improvements
+- **Loading spinner**: Braille-pattern animation (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) during agent thinking/waiting states
+- **MCP tool results**: Full results displayed in Rich panels instead of truncated text
+- **`mcp_data_returned` flag**: Tracks whether MCP tools already returned data to skip redundant prompts
+
+### Pipeline Fixes
+- **MCP for orchestrators**: Added "orchestrator" to `mcp_stages` tuple so intake agents can use database tools
+- **WAITING_FOR_USER in multi-agent**: `run_stage()` now calls `handle_user_question()` after each agent
+- **MCP error logging**: WebSocket handler logs MCP setup errors instead of silently swallowing them
+- **Tool result truncation**: Increased from 500→3000 chars for query results
+
+### Files Modified
+- `agents/runner.py` — `_auto_discover_schema()`, `_auto_execute_db_queries()`, MCP stage fix, user question handling
+- `cli/interactive.py` — `LoadingSpinner` class, `mcp_data_returned` state, tool result panels
+- `server/app.py` — MCP error logging
+- `mcp/tool_executor.py` — Result truncation increase
+
+---
+
 ## v6.1.0 — Claude Code-Style CLI + Plan-Execute Fix (2026-03-26)
 
 ### Summary
