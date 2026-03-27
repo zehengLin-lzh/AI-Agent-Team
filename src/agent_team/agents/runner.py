@@ -134,6 +134,76 @@ class AgentTeam:
                 "message": f"Schema discovered: {len(table_names)} tables ({', '.join(table_names)})",
             })
 
+    async def _auto_execute_db_queries(self, planner_output: str):
+        """Extract SQL queries from planner output and auto-execute via MCP.
+
+        Small models don't reliably generate TOOL_CALL blocks, so we extract
+        SQL from code blocks in the planner output and run them directly.
+        Results are sent to the CLI as tool_results.
+        """
+        if not self.mcp_registry:
+            return
+
+        # Extract SQL from code blocks (```sql ... ``` or SELECT ... ;)
+        import re as _re
+        sql_blocks = _re.findall(
+            r'```sql\s*\n(.*?)```', planner_output, _re.DOTALL | _re.IGNORECASE
+        )
+        if not sql_blocks:
+            # Try bare SELECT statements
+            sql_blocks = _re.findall(
+                r'(SELECT\s+.+?;)', planner_output, _re.DOTALL | _re.IGNORECASE
+            )
+        if not sql_blocks:
+            return
+
+        # Detect connection profile
+        conn_name = ""
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
+            if cfg_path.exists():
+                cfg = _json.loads(cfg_path.read_text())
+                conn_name = cfg.get("default_connection", "")
+                if not conn_name and cfg.get("profiles"):
+                    conn_name = next(iter(cfg["profiles"]))
+        except Exception:
+            pass
+
+        await self.send_status("Executing SQL queries...", "query")
+        exec_log = []
+
+        for sql in sql_blocks[:5]:  # Max 5 queries
+            sql = sql.strip()
+            if not sql:
+                continue
+            try:
+                args = {"sql": sql}
+                if conn_name:
+                    args["connection"] = conn_name
+                result = await self.mcp_registry.call_tool_by_name("db_query", args)
+                exec_log.append({
+                    "tool": "db_query",
+                    "arguments": {"sql": sql[:100], "connection": conn_name},
+                    "result": result.content[:3000] if result else "",
+                    "is_error": result.is_error if result else True,
+                })
+            except Exception as exc:
+                exec_log.append({
+                    "tool": "db_query",
+                    "arguments": {"sql": sql[:100]},
+                    "result": str(exc)[:500],
+                    "is_error": True,
+                })
+
+        if exec_log:
+            await self.ws.send_json({
+                "type": "tool_results",
+                "agent": "PLANNER",
+                "tools_executed": exec_log,
+            })
+
     def _swap_model_for_agent(self, agent_name: str) -> tuple[str | None, bool]:
         """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
         if self.complexity == TaskComplexity.SIMPLE:
@@ -562,6 +632,10 @@ class AgentTeam:
             if created:
                 await self.send_status(f"Scaffolded {len(created)} path(s).", "plan")
 
+        # Auto-execute SQL if MCP db tools are available
+        if self.mcp_registry:
+            await self._auto_execute_db_queries(output)
+
     async def _write_executor_files(self, executor_output: str):
         """Write files from executor output to disk (shared by legacy and named pipeline)."""
         if self.mode not in (AgentMode.CODING, AgentMode.EXECUTION):
@@ -795,6 +869,9 @@ class AgentTeam:
                                 execution_path=self.execution_path,
                                 mode=self.mode.value,
                             )
+                            # Auto-execute SQL if MCP db tools are available
+                            if self.mcp_registry:
+                                await self._auto_execute_db_queries(plan_out)
                     elif stage_name == "executor":
                         # Trigger file writing from executor output
                         exec_out = self.phase_outputs.get(f"STAGE_EXECUTOR", "")
