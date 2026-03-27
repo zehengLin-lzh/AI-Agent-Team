@@ -144,16 +144,42 @@ class AgentTeam:
         if not self.mcp_registry:
             return
 
-        # Extract SQL from code blocks (```sql ... ``` or SELECT ... ;)
+        # Extract SQL from planner output — try multiple patterns since small
+        # models put SQL in various formats (```sql, ```python, inline, etc.)
         import re as _re
-        sql_blocks = _re.findall(
+        sql_blocks: list[str] = []
+
+        # 1) ```sql ... ``` blocks
+        sql_blocks += _re.findall(
             r'```sql\s*\n(.*?)```', planner_output, _re.DOTALL | _re.IGNORECASE
         )
+
+        # 2) sql="SELECT ..." or sql='SELECT ...' inside Python/other code blocks
+        sql_blocks += _re.findall(
+            r'sql\s*=\s*["\'](.+?)["\']', planner_output, _re.DOTALL | _re.IGNORECASE
+        )
+
+        # 3) Bare SELECT ... (with or without semicolon, multiline until next blank line or ```)
         if not sql_blocks:
-            # Try bare SELECT statements
-            sql_blocks = _re.findall(
-                r'(SELECT\s+.+?;)', planner_output, _re.DOTALL | _re.IGNORECASE
+            sql_blocks += _re.findall(
+                r'(SELECT\s+.+?)(?:;|\n\n|```|\Z)', planner_output,
+                _re.DOTALL | _re.IGNORECASE,
             )
+
+        # 4) Inside backtick-quoted inline: `SELECT ...`
+        if not sql_blocks:
+            sql_blocks += _re.findall(
+                r'`(SELECT\s+[^`]+)`', planner_output, _re.IGNORECASE
+            )
+
+        # Clean up: only keep actual SELECT statements
+        cleaned = []
+        for s in sql_blocks:
+            s = s.strip().rstrip(";").strip()
+            if _re.match(r'^SELECT\s', s, _re.IGNORECASE):
+                cleaned.append(s)
+        sql_blocks = cleaned
+
         if not sql_blocks:
             return
 
