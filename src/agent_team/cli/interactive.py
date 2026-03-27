@@ -460,6 +460,50 @@ def render_phase_header(phase: str, label: str):
     console.print(Rule(f"[dim]{label}[/]", style="dim"))
 
 
+# ── Loading Spinner ──────────────────────────────────────────────────────────
+
+class LoadingSpinner:
+    """Animated dots spinner for waiting states. Non-blocking via asyncio."""
+
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, message: str = "Thinking"):
+        self.message = message
+        self._task: asyncio.Task | None = None
+        self._running = False
+        self._frame_idx = 0
+
+    async def _animate(self):
+        """Animate the spinner on the current line."""
+        import time
+        while self._running:
+            frame = self.FRAMES[self._frame_idx % len(self.FRAMES)]
+            # Write spinner: \r to return to line start, then message
+            sys.stdout.write(f"\r\033[2m{frame} {self.message}...\033[0m")
+            sys.stdout.flush()
+            self._frame_idx += 1
+            await asyncio.sleep(0.08)
+
+    def start(self, message: str | None = None):
+        """Start the spinner animation."""
+        if message:
+            self.message = message
+        self._running = True
+        self._frame_idx = 0
+        self._task = asyncio.ensure_future(self._animate())
+
+    def stop(self, clear: bool = True):
+        """Stop the spinner and clear the line."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
+        if clear:
+            # Clear the spinner line
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+
+
 _EXT_TO_LANG = {
     ".py": "python", ".js": "javascript", ".ts": "typescript", ".jsx": "jsx",
     ".tsx": "tsx", ".java": "java", ".go": "go", ".rs": "rust", ".rb": "ruby",
@@ -573,25 +617,38 @@ async def stream_conversation(
             current_buffer = ""
             current_agent = None
             at_line_start = True  # Track gutter state for │ prefix
+            spinner = LoadingSpinner()
+            first_token_received = False
 
             async for raw in ws:
                 msg = json.loads(raw)
                 t = msg.get("type")
 
                 if t == "status":
+                    spinner.stop()
                     phase = msg.get("phase", "")
                     label = msg.get("message", phase)
                     render_phase_header(phase, label)
+                    # Start spinner while waiting for next agent
+                    spinner.start(label.split("(")[0].strip().rstrip("."))
 
                 elif t == "agent_start":
+                    spinner.stop()
                     current_agent = msg.get("agent", "")
                     model = msg.get("model", state.model)
                     display_name = msg.get("display_name", "")
                     current_buffer = ""
                     at_line_start = True
+                    first_token_received = False
                     render_agent_header(current_agent, model, display_name=display_name)
+                    # Show spinner while waiting for first token
+                    short_name = display_name or current_agent
+                    spinner.start(f"{short_name} thinking")
 
                 elif t == "token":
+                    if not first_token_received:
+                        spinner.stop()
+                        first_token_received = True
                     token = msg.get("content", "")
                     # Stream with left gutter (│) for Claude Code-style output
                     for ch in token:
@@ -605,11 +662,12 @@ async def stream_conversation(
                     current_buffer += token
 
                 elif t == "agent_done":
+                    spinner.stop()
                     if current_buffer:
                         if not current_buffer.endswith("\n"):
                             sys.stdout.write("\n")
                         sys.stdout.flush()
-                    # Close the agent box with ╰─ and compact stats
+                    # Close the agent box with ╰─ and compact stats in dim
                     ts = msg.get("token_stats")
                     if ts and ts.get("total_tokens", 0) > 0:
                         console.print(
@@ -620,6 +678,7 @@ async def stream_conversation(
                         console.print("[dim]╰─[/]")
                     current_agent = None
                     at_line_start = True
+                    first_token_received = False
 
                 elif t == "memory_context":
                     results = msg.get("results", [])
@@ -682,6 +741,7 @@ async def stream_conversation(
                         console.print(f"\n[success]\U0001f4a1 Learned {patterns} new pattern(s) from this session.[/]")
 
                 elif t == "waiting_for_user":
+                    spinner.stop()
                     question = msg.get("question", "")
                     console.print()
                     console.print(f"[bold yellow]? {question}[/]")
@@ -691,6 +751,7 @@ async def stream_conversation(
                     await ws.send(json.dumps({"content": user_reply}))
 
                 elif t == "complete":
+                    spinner.stop()
                     token_summary = msg.get("token_summary")
                     model_used = msg.get("model", state.model)
                     total = token_summary.get("total", 0) if token_summary else 0
@@ -707,6 +768,7 @@ async def stream_conversation(
                     break
 
                 elif t == "error":
+                    spinner.stop()
                     console.print(f"\n[error]\u2716 Error: {msg.get('content', 'Unknown error')}[/]")
                     break
 
