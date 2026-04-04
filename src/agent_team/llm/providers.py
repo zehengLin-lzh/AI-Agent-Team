@@ -75,8 +75,9 @@ class AnthropicProvider(OpenAICompatProvider):
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
         display_name: str = "",
+        model_override: str | None = None,
     ) -> str:
-        model = self._active_model
+        model = model_override or self._active_model
         full_response = ""
 
         # Anthropic format: system is a top-level field, not in messages
@@ -207,7 +208,9 @@ class AnthropicProvider(OpenAICompatProvider):
         system_prompt: str,
         messages: list[dict],
         temperature: float = 0.3,
+        model_override: str | None = None,
     ) -> str:
+        model = model_override or self._active_model
         chat_messages = []
         for msg in messages:
             chat_messages.append({
@@ -216,7 +219,7 @@ class AnthropicProvider(OpenAICompatProvider):
             })
 
         payload = {
-            "model": self._active_model,
+            "model": model,
             "system": system_prompt,
             "messages": chat_messages,
             "max_tokens": self.max_tokens,

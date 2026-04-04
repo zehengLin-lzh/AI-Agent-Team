@@ -162,8 +162,9 @@ class HuggingFaceProvider(LLMProvider):
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
         display_name: str = "",
+        model_override: str | None = None,
     ) -> str:
-        model = self._active_model
+        model = model_override or self._active_model
         full_response = ""
         formatted_messages = _format_chat_messages(system_prompt, messages)
 
@@ -271,11 +272,13 @@ class HuggingFaceProvider(LLMProvider):
         system_prompt: str,
         messages: list[dict],
         temperature: float = 0.3,
+        model_override: str | None = None,
     ) -> str:
+        model = model_override or self._active_model
         formatted_messages = _format_chat_messages(system_prompt, messages)
 
         payload = {
-            "model": self._active_model,
+            "model": model,
             "messages": formatted_messages,
             "max_tokens": 4096,
             "temperature": temperature,

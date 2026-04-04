@@ -84,6 +84,7 @@ async def stream_llm(
     temperature: float = 0.3,
     token_tracker: SessionTokenTracker | None = None,
     display_name: str = "",
+    model_override: str | None = None,
 ) -> str:
     """Stream via the active provider."""
     return await get_provider().stream(
@@ -95,6 +96,7 @@ async def stream_llm(
         temperature=temperature,
         token_tracker=token_tracker,
         display_name=display_name,
+        model_override=model_override,
     )
 
 
@@ -102,10 +104,12 @@ async def call_llm(
     system_prompt: str,
     messages: list[dict],
     temperature: float = 0.3,
+    model_override: str | None = None,
 ) -> str:
     """Non-streaming call via the active provider."""
     return await get_provider().call(
         system_prompt=system_prompt,
         messages=messages,
         temperature=temperature,
+        model_override=model_override,
     )

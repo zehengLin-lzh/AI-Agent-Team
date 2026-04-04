@@ -14,7 +14,7 @@ from agent_team.agents.definitions import (
 )
 from agent_team.agents.context import build_context_for_agent, build_pattern_context
 from agent_team.agents.complexity import TaskComplexity, classify_complexity
-from agent_team.llm import call_llm, get_active_model, set_active_model
+from agent_team.llm import call_llm
 from agent_team.files.writer import extract_and_write_files
 from agent_team.files.scaffolder import scaffold_plan_paths
 
@@ -42,32 +42,13 @@ class AskResponse(BaseModel):
     file_changes: list[dict] | None = None  # Rich file change data with diffs
 
 
-def _swap_model(agent_name: str, complexity: str = "medium") -> tuple[str | None, bool]:
-    """Swap to routed model. Returns (original, did_swap)."""
+def _get_model_for_agent(agent_name: str, complexity: str = "medium") -> str | None:
+    """Resolve the routed model name for an agent without mutating global state."""
     if complexity == "simple":
-        routed = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        return SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
     elif complexity == "medium":
-        routed = MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
-    else:
-        routed = MODEL_ROUTING.get(agent_name)
-    if not routed:
-        return None, False
-    try:
-        original = get_active_model()
-        if routed != original:
-            set_active_model(routed)
-            return original, True
-    except Exception:
-        pass
-    return None, False
-
-
-def _restore_model(original: str | None, did_swap: bool):
-    if did_swap and original:
-        try:
-            set_active_model(original)
-        except Exception:
-            pass
+        return MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+    return MODEL_ROUTING.get(agent_name)
 
 
 async def _run_agent_http(
@@ -95,16 +76,14 @@ async def _run_agent_http(
         proceed_msg += f"\n\n{extra_instruction}"
     messages.append({"role": "user", "content": proceed_msg})
 
-    # Model routing
-    original_model, did_swap = _swap_model(agent_name, complexity)
-    try:
-        content = await call_llm(
-            system_prompt=system_prompt,
-            messages=messages,
-            temperature=temperature,
-        )
-    finally:
-        _restore_model(original_model, did_swap)
+    # Model routing (parallel-safe, no global mutation)
+    routed_model = _get_model_for_agent(agent_name, complexity)
+    content = await call_llm(
+        system_prompt=system_prompt,
+        messages=messages,
+        temperature=temperature,
+        model_override=routed_model,
+    )
 
     phase_outputs[agent_name] = content
     return content
@@ -124,38 +103,32 @@ async def _run_debate_http(
     temperature = MODE_TEMPERATURES.get(agent_mode, 0.3)
 
     # CHALLENGER
-    original_model, did_swap = _swap_model("CHALLENGER", complexity)
-    try:
-        challenge_messages = [
-            {"role": "user", "content": original_plan},
-            {"role": "assistant", "content": thinker_output},
-            {"role": "user", "content": "Please critically review the above analysis. Find weaknesses, gaps, and suggest improvements."},
-        ]
-        challenger_output = await call_llm(
-            system_prompt=DEBATE_CHALLENGER_PROMPT,
-            messages=challenge_messages,
-            temperature=temperature + 0.1,
-        )
-        phase_outputs["CHALLENGER"] = challenger_output
-    finally:
-        _restore_model(original_model, did_swap)
+    challenge_messages = [
+        {"role": "user", "content": original_plan},
+        {"role": "assistant", "content": thinker_output},
+        {"role": "user", "content": "Please critically review the above analysis. Find weaknesses, gaps, and suggest improvements."},
+    ]
+    challenger_output = await call_llm(
+        system_prompt=DEBATE_CHALLENGER_PROMPT,
+        messages=challenge_messages,
+        temperature=temperature + 0.1,
+        model_override=_get_model_for_agent("CHALLENGER", complexity),
+    )
+    phase_outputs["CHALLENGER"] = challenger_output
 
     # THINKER_REFINED
-    original_model2, did_swap2 = _swap_model("THINKER_REFINED", complexity)
-    try:
-        response_messages = [
-            {"role": "user", "content": original_plan},
-            {"role": "assistant", "content": thinker_output},
-            {"role": "user", "content": f"A critical reviewer has raised these challenges:\n\n{challenger_output}\n\nPlease respond to each challenge and produce a refined analysis."},
-        ]
-        refined = await call_llm(
-            system_prompt=DEBATE_RESPONSE_PROMPT,
-            messages=response_messages,
-            temperature=temperature,
-        )
-        phase_outputs["THINKER"] = refined  # Replace with refined
-    finally:
-        _restore_model(original_model2, did_swap2)
+    response_messages = [
+        {"role": "user", "content": original_plan},
+        {"role": "assistant", "content": thinker_output},
+        {"role": "user", "content": f"A critical reviewer has raised these challenges:\n\n{challenger_output}\n\nPlease respond to each challenge and produce a refined analysis."},
+    ]
+    refined = await call_llm(
+        system_prompt=DEBATE_RESPONSE_PROMPT,
+        messages=response_messages,
+        temperature=temperature,
+        model_override=_get_model_for_agent("THINKER_REFINED", complexity),
+    )
+    phase_outputs["THINKER"] = refined  # Replace with refined
 
 
 def _needs_fix(output: str) -> list[str]:
@@ -217,43 +190,48 @@ async def run_team_http(
         is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
 
         if is_named and len(phase_group) > 1:
-            # Sequential discussion: each agent sees previous agents' output
-            outputs: dict[str, str] = {}
-            for i, aid in enumerate(phase_group):
-                if i == 0:
-                    out = await _run_agent_http(
-                        aid, user_plan, phase_outputs, agent_mode,
-                        complexity=complexity.value, patterns_context=patterns_context,
-                    )
-                else:
-                    colleague_text = "\n\n---\n\n".join(
-                        f"[{AGENT_REGISTRY_MAP[pid].name}]:\n{po}"
-                        for pid, po in outputs.items()
-                    )
-                    colleague_names = ", ".join(
-                        AGENT_REGISTRY_MAP[pid].name for pid in outputs
-                    )
-                    out = await _run_agent_http(
-                        aid, user_plan, phase_outputs, agent_mode,
-                        complexity=complexity.value, patterns_context=patterns_context,
-                        extra_instruction=(
-                            f"Your colleague(s) {colleague_names} already analyzed this. "
-                            f"Review their work, add your unique perspective, and note "
-                            f"any disagreements or gaps.\n\n"
-                            f"Colleague analysis:\n{colleague_text}"
-                        ),
-                    )
-                outputs[aid] = out
+            # Phase 1: Parallel independent thinking
+            think_results = await asyncio.gather(*[
+                _run_agent_http(
+                    aid, user_plan, phase_outputs, agent_mode,
+                    complexity=complexity.value, patterns_context=patterns_context,
+                )
+                for aid in phase_group
+            ])
+            think_outputs: dict[str, str] = {}
+            for aid, out in zip(phase_group, think_results):
+                think_outputs[aid] = out
                 phase_outputs[aid] = out
 
-            # Determine stage name
+            # Phase 2: Parallel discussion — each agent sees all Phase 1 outputs
+            all_perspectives = "\n\n---\n\n".join(
+                f"[{AGENT_REGISTRY_MAP[aid].name}]:\n{out}"
+                for aid, out in think_outputs.items()
+            )
+            discuss_results = await asyncio.gather(*[
+                _run_agent_http(
+                    aid, user_plan, phase_outputs, agent_mode,
+                    complexity=complexity.value, patterns_context=patterns_context,
+                    extra_instruction=(
+                        "Your colleagues have completed their independent analysis. "
+                        "Review all perspectives below. Be concise — only address "
+                        "disagreements, gaps, and strengthen the strongest ideas.\n\n"
+                        f"All perspectives:\n{all_perspectives}"
+                    ),
+                )
+                for aid in phase_group
+            ])
+            discussion_outputs: dict[str, str] = {}
+            for aid, out in zip(phase_group, discuss_results):
+                discussion_outputs[aid] = out
+                phase_outputs[aid] = out
+
+            # Phase 3: Synthesis
             stage_name = AGENT_REGISTRY_MAP[phase_group[0]].stage
             stage_key = f"STAGE_{stage_name.upper()}"
-
-            # Synthesize: run lead agent again with all perspectives
             lead = phase_group[0]
             perspectives = "\n\n---\n\n".join(
-                f"[{AGENT_REGISTRY_MAP[a].name}]:\n{o}" for a, o in outputs.items()
+                f"[{AGENT_REGISTRY_MAP[a].name}]:\n{o}" for a, o in discussion_outputs.items()
             )
             synth = await _run_agent_http(
                 lead, user_plan, phase_outputs, agent_mode,

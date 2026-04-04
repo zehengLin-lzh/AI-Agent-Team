@@ -55,6 +55,28 @@ class SessionTokenTracker:
             },
         }
 
+    def estimate_cost(self, model: str = "") -> dict:
+        """Estimate API cost based on known pricing (per 1K tokens)."""
+        # Pricing per 1K tokens (input, output) — update as needed
+        pricing = {
+            "gpt-4o": (0.0025, 0.01),
+            "gpt-4o-mini": (0.00015, 0.0006),
+            "gpt-4.1": (0.002, 0.008),
+            "gpt-4.1-mini": (0.0004, 0.0016),
+            "claude-sonnet-4-20250514": (0.003, 0.015),
+            "claude-opus-4-20250514": (0.015, 0.075),
+            "claude-haiku-4-20250514": (0.0008, 0.004),
+        }
+        in_price, out_price = pricing.get(model, (0.0, 0.0))
+        input_cost = (self.total_prompt / 1000) * in_price
+        output_cost = (self.total_completion / 1000) * out_price
+        return {
+            "model": model,
+            "input_cost": round(input_cost, 4),
+            "output_cost": round(output_cost, 4),
+            "total_cost": round(input_cost + output_cost, 4),
+        }
+
 
 class LLMProvider(ABC):
     """Abstract base for LLM providers (Ollama, HuggingFace, etc.)."""
@@ -72,6 +94,7 @@ class LLMProvider(ABC):
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
         display_name: str = "",
+        model_override: str | None = None,
     ) -> str:
         """Stream a response, sending tokens over WebSocket. Returns full response."""
         ...
@@ -82,6 +105,7 @@ class LLMProvider(ABC):
         system_prompt: str,
         messages: list[dict],
         temperature: float = 0.3,
+        model_override: str | None = None,
     ) -> str:
         """Non-streaming call. Returns full response text."""
         ...

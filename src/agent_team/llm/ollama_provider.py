@@ -67,8 +67,9 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
         display_name: str = "",
+        model_override: str | None = None,
     ) -> str:
-        model = self._active_model
+        model = model_override or self._active_model
         full_response = ""
         payload = {
             "model": model,
@@ -144,8 +145,9 @@ class OllamaProvider(LLMProvider):
         system_prompt: str,
         messages: list[dict],
         temperature: float = 0.3,
+        model_override: str | None = None,
     ) -> str:
-        model = self._active_model
+        model = model_override or self._active_model
         payload = {
             "model": model,
             "stream": False,

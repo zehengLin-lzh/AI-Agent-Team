@@ -1233,6 +1233,28 @@ questions_for_user: [specific questions that need answers before proceeding]
 """
 
 
+SUBAGENT_INSTRUCTION = """
+You may delegate ONE focused research subtask to a subagent. Use this when you need
+to investigate a specific technical detail, check compatibility, or gather focused
+information that would distract from your main analysis. The subagent will research
+and return results that you can integrate into your final output.
+
+To request a subagent, include this block in your output:
+
+---SUBAGENT_REQUEST---
+task: <concise description of what to research>
+focus: <specific question or deliverable the subagent should answer>
+---END_SUBAGENT_REQUEST---
+
+Guidelines:
+- Maximum 1 subagent request per response
+- Keep the task focused and specific (not broad exploration)
+- The subagent is a lightweight assistant — it cannot run tools or write files
+- Your output will be paused, the subagent runs, and you will be asked to integrate the results
+- Only use a subagent when the research would genuinely improve your analysis
+"""
+
+
 # ---------------------------------------------------------------------------
 # Re-loop targets — where to go back when a stage is blocked
 # ---------------------------------------------------------------------------

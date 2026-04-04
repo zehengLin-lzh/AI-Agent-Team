@@ -99,8 +99,9 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.3,
         token_tracker: SessionTokenTracker | None = None,
         display_name: str = "",
+        model_override: str | None = None,
     ) -> str:
-        model = self._active_model
+        model = model_override or self._active_model
         full_response = ""
 
         chat_messages = [{"role": "system", "content": system_prompt}]
@@ -223,7 +224,9 @@ class OpenAICompatProvider(LLMProvider):
         system_prompt: str,
         messages: list[dict],
         temperature: float = 0.3,
+        model_override: str | None = None,
     ) -> str:
+        model = model_override or self._active_model
         chat_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
             chat_messages.append({
@@ -232,7 +235,7 @@ class OpenAICompatProvider(LLMProvider):
             })
 
         payload = {
-            "model": self._active_model,
+            "model": model,
             "messages": chat_messages,
             "max_tokens": self.max_tokens,
             "temperature": temperature,

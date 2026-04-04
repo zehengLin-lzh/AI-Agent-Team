@@ -64,6 +64,10 @@ MEDIUM_MODEL_ROUTING: dict[str, str] = {
 }
 
 MAX_FIX_LOOPS = 3
+MAX_SUBAGENTS_PER_AGENT = 1
+SUBAGENT_MAX_INPUT_TOKENS = 2000
+SUBAGENT_MAX_OUTPUT_TOKENS = 1000
+DISCUSSION_MAX_OUTPUT_TOKENS = 2000
 PLAN_DIR_ENV = "AGENT_TEAM_PLAN_DIR"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # src/agent_team/ → repo root
 CONFIG_FILE = REPO_ROOT / "agent_team.config.json"

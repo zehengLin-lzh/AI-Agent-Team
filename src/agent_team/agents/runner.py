@@ -6,20 +6,41 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from agent_team.config import (
     MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING,
+    DISCUSSION_MAX_OUTPUT_TOKENS, MAX_SUBAGENTS_PER_AGENT,
+    SUBAGENT_MAX_INPUT_TOKENS, SUBAGENT_MAX_OUTPUT_TOKENS, FAST_MODEL,
 )
 from agent_team.agents.definitions import (
     AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
     MEDIUM_PHASE_ORDER, COMPLEX_PHASE_ORDER,
     AGENT_REGISTRY_MAP, SYNTHESIS_PROMPT, HANDOFF_FORMAT, RELOOP_TARGETS,
+    SUBAGENT_INSTRUCTION,
     get_agent_prompt, CONTEXT_AGENTS,
     DEBATE_CHALLENGER_PROMPT, DEBATE_RESPONSE_PROMPT,
 )
 from agent_team.agents.context import build_context_for_agent, build_pattern_context
 from agent_team.agents.complexity import TaskComplexity, classify_complexity
-from agent_team.llm import stream_llm, SessionTokenTracker, get_active_model, set_active_model
+from agent_team.llm import stream_llm, call_llm, SessionTokenTracker, get_active_model, set_active_model
 from agent_team.files.writer import extract_and_write_files, extract_run_commands, _resolve_base_dir
 from agent_team.files.scaffolder import scaffold_plan_paths
 from agent_team.plans.storage import save_plan_markdown
+
+
+class _LockedWebSocket:
+    """Wrapper that serializes send_json calls for parallel-safe WebSocket writes."""
+
+    def __init__(self, ws: WebSocket, lock: asyncio.Lock):
+        self._ws = ws
+        self._lock = lock
+
+    async def send_json(self, data: dict) -> None:
+        async with self._lock:
+            await self._ws.send_json(data)
+
+    async def receive_text(self) -> str:
+        return await self._ws.receive_text()
+
+    async def close(self, *args, **kwargs):
+        await self._ws.close(*args, **kwargs)
 
 
 class AgentTeam:
@@ -31,7 +52,9 @@ class AgentTeam:
         reuse_plan: bool = False,
         prior_phase_outputs: dict[str, str] | None = None,
     ):
-        self.ws = ws
+        self._raw_ws = ws
+        self._ws_lock = asyncio.Lock()  # Protects ws.send_json for parallel agents
+        self.ws = _LockedWebSocket(ws, self._ws_lock)
         self.execution_path = execution_path
         self.plan_only = plan_only
         self.reuse_plan = reuse_plan
@@ -51,7 +74,7 @@ class AgentTeam:
         self.token_tracker = SessionTokenTracker()
 
     async def send_status(self, message: str, phase: str = ""):
-        await self.ws.send_json({
+        await self.send_json({
             "type": "status",
             "message": message,
             "phase": phase,
@@ -238,7 +261,10 @@ class AgentTeam:
             })
 
     def _swap_model_for_agent(self, agent_name: str) -> tuple[str | None, bool]:
-        """Swap to the routed model for this agent. Returns (original_model, did_swap)."""
+        """Swap to the routed model for this agent. Returns (original_model, did_swap).
+
+        .. deprecated:: Use _get_model_for_agent() + model_override instead.
+        """
         if self.complexity == TaskComplexity.SIMPLE:
             routed_model = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
         elif self.complexity == TaskComplexity.MEDIUM:
@@ -264,6 +290,14 @@ class AgentTeam:
             except Exception:
                 pass
 
+    def _get_model_for_agent(self, agent_name: str) -> str | None:
+        """Resolve the routed model name for an agent without mutating global state."""
+        if self.complexity == TaskComplexity.SIMPLE:
+            return SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        elif self.complexity == TaskComplexity.MEDIUM:
+            return MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        return MODEL_ROUTING.get(agent_name)
+
     async def run_agent(
         self, agent_name: str,
         intra_stage_outputs: dict[str, str] | None = None,
@@ -275,6 +309,10 @@ class AgentTeam:
         # For MEDIUM/COMPLEX, append handoff format instructions
         if self.complexity != TaskComplexity.SIMPLE and agent_name in AGENT_REGISTRY_MAP:
             system_prompt += "\n\n" + HANDOFF_FORMAT
+
+        # For COMPLEX tasks, inject subagent capability
+        if self.complexity == TaskComplexity.COMPLEX and agent_name in AGENT_REGISTRY_MAP:
+            system_prompt += "\n\n" + SUBAGENT_INSTRUCTION
 
         # Inject MCP tool descriptions into system prompt for agents that can use them
         spec = AGENT_REGISTRY_MAP.get(agent_name)
@@ -298,22 +336,20 @@ class AgentTeam:
             proceed_msg += f"\n\n{extra_instruction}"
         messages.append({"role": "user", "content": proceed_msg})
 
-        # Model routing: swap to the configured model for this agent role
-        original_model, did_swap = self._swap_model_for_agent(agent_name)
+        # Model routing: resolve model for this agent (parallel-safe, no global mutation)
+        routed_model = self._get_model_for_agent(agent_name)
 
-        try:
-            output = await stream_llm(
-                system_prompt=system_prompt,
-                messages=messages,
-                ws=self.ws,
-                agent_name=agent_name,
-                agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
-                temperature=temperature,
-                token_tracker=self.token_tracker,
-                display_name=display_name,
-            )
-        finally:
-            self._restore_model(original_model, did_swap)
+        output = await stream_llm(
+            system_prompt=system_prompt,
+            messages=messages,
+            ws=self.ws,
+            agent_name=agent_name,
+            agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
+            temperature=temperature,
+            token_tracker=self.token_tracker,
+            display_name=display_name,
+            model_override=routed_model,
+        )
 
         # Execute any MCP tool calls found in the output
         if self.mcp_registry and "TOOL_CALL:" in output:
@@ -330,6 +366,37 @@ class AgentTeam:
             except Exception:
                 pass
 
+        # Execute subagent requests (COMPLEX tasks only, max 1 per agent)
+        if self.complexity == TaskComplexity.COMPLEX:
+            subagent_tasks = self._parse_subagent_requests(output)
+            if subagent_tasks:
+                task = subagent_tasks[0]  # Limit to 1
+                await self.send_status(
+                    f"Subagent researching for {display_name}: {task['task'][:60]}...",
+                    "subagent",
+                )
+                sub_result = await self._run_subagent(agent_name, task)
+                # Let the agent integrate subagent results
+                output = await stream_llm(
+                    system_prompt=system_prompt,
+                    messages=messages + [
+                        {"role": "assistant", "content": output},
+                        {"role": "user", "content": (
+                            f"Your subagent research is complete:\n\n"
+                            f"**Task:** {task['task']}\n"
+                            f"**Results:**\n{sub_result}\n\n"
+                            f"Integrate these findings into your final analysis."
+                        )},
+                    ],
+                    ws=self.ws,
+                    agent_name=f"{agent_name}_INTEGRATE",
+                    agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
+                    temperature=temperature,
+                    token_tracker=self.token_tracker,
+                    display_name=f"{display_name} (integrating)",
+                    model_override=routed_model,
+                )
+
         self.phase_outputs[agent_name] = output
 
         # Send agent output for session tracking
@@ -340,6 +407,45 @@ class AgentTeam:
         })
 
         return output
+
+    def _parse_subagent_requests(self, output: str) -> list[dict]:
+        """Parse ---SUBAGENT_REQUEST--- blocks from agent output."""
+        requests = []
+        for m in re.finditer(
+            r"---SUBAGENT_REQUEST---\s*\n(.*?)---END_SUBAGENT_REQUEST---",
+            output, re.DOTALL,
+        ):
+            block = m.group(1).strip()
+            task = {}
+            for line in block.splitlines():
+                line = line.strip()
+                if line.startswith("task:"):
+                    task["task"] = line.split(":", 1)[1].strip()
+                elif line.startswith("focus:"):
+                    task["focus"] = line.split(":", 1)[1].strip()
+            if task.get("task"):
+                requests.append(task)
+                if len(requests) >= MAX_SUBAGENTS_PER_AGENT:
+                    break
+        return requests
+
+    async def _run_subagent(self, parent_agent: str, task: dict) -> str:
+        """Run a lightweight subagent — uses fast model, no streaming, no tools."""
+        spec = AGENT_REGISTRY_MAP.get(parent_agent)
+        parent_name = spec.name if spec else parent_agent
+        focus = task.get("focus", task["task"])
+
+        result = await call_llm(
+            system_prompt=(
+                f"You are a focused research assistant working for {parent_name}. "
+                f"Your job: {focus}\n\n"
+                f"Be concise and factual. Return only the relevant findings."
+            ),
+            messages=[{"role": "user", "content": task["task"]}],
+            temperature=0.2,
+            model_override=FAST_MODEL,
+        )
+        return result
 
     def needs_user_input(self, output: str) -> str | None:
         match = re.search(r"WAITING_FOR_USER:\s*(.+?)(?:\n\n|\Z)", output, re.DOTALL)
@@ -391,11 +497,11 @@ class AgentTeam:
     async def run_stage(self, agent_ids: list[str], stage_name: str) -> dict[str, str]:
         """Run a pipeline stage with 1+ agents.
 
-        Sequential discussion model:
-        - Agent 1 runs first and produces output
-        - Agent 2+ each run with Agent 1's output as "colleague's analysis"
-        - If 2+ agents: lead agent synthesizes all perspectives into one output
-        This ensures each agent gets its own clear section in the CLI.
+        Parallel think → discuss → synthesis model:
+        - Phase 1: All agents run in parallel, independently
+        - Phase 2: All agents see everyone's Phase 1 output, discuss in parallel
+        - Phase 3: Lead agent synthesizes all discussion outputs
+        For single-agent stages, runs directly without discussion.
         """
         phase_label = {
             "orchestrator": "Understanding your request",
@@ -417,40 +523,51 @@ class AgentTeam:
             self.phase_outputs[f"STAGE_{stage_name.upper()}"] = output
             return {agent_ids[0]: output}
 
-        # Sequential discussion: each agent sees the previous agents' outputs
-        outputs: dict[str, str] = {}
-        for i, aid in enumerate(agent_ids):
-            if i == 0:
-                # First agent runs without colleague context
-                output = await self.run_agent(aid)
-            else:
-                # Subsequent agents receive all prior outputs as colleague context
-                colleague_text = "\n\n---\n\n".join(
-                    f"[{AGENT_REGISTRY_MAP[prev_id].name}]:\n{prev_out}"
-                    for prev_id, prev_out in outputs.items()
-                )
-                spec = AGENT_REGISTRY_MAP.get(aid)
-                colleague_names = ", ".join(
-                    AGENT_REGISTRY_MAP[pid].name for pid in outputs
-                )
-                output = await self.run_agent(
-                    aid,
-                    extra_instruction=(
-                        f"Your colleague(s) {colleague_names} already analyzed this. "
-                        f"Review their work, add your unique perspective, and note any "
-                        f"disagreements or gaps.\n\n"
-                        f"Colleague analysis:\n{colleague_text}"
-                    ),
-                )
-            # Check if agent needs user input before next agent runs
-            await self.handle_user_question(output, aid)
-            output = self.phase_outputs.get(aid, output)
-            outputs[aid] = output
+        # === Phase 1: Parallel independent thinking ===
+        await self.send_status(
+            f"{phase_label} — parallel thinking ({agent_names})...", stage_name,
+        )
 
-        # Synthesis: lead agent combines all perspectives into one canonical output
-        synth = await self._synthesize_stage(agent_ids[0], outputs, stage_name)
+        async def _run_think(aid: str) -> tuple[str, str]:
+            out = await self.run_agent(aid)
+            await self.handle_user_question(out, aid)
+            out = self.phase_outputs.get(aid, out)
+            return aid, out
+
+        think_results = await asyncio.gather(*[_run_think(aid) for aid in agent_ids])
+        think_outputs: dict[str, str] = {aid: out for aid, out in think_results}
+
+        # === Phase 2: Parallel discussion — each agent sees all Phase 1 outputs ===
+        await self.send_status(
+            f"{phase_label} — discussion round ({agent_names})...", stage_name,
+        )
+
+        all_perspectives = "\n\n---\n\n".join(
+            f"[{AGENT_REGISTRY_MAP[aid].name}]:\n{out}"
+            for aid, out in think_outputs.items()
+        )
+
+        async def _run_discuss(aid: str) -> tuple[str, str]:
+            out = await self.run_agent(
+                aid,
+                extra_instruction=(
+                    "Your colleagues have completed their independent analysis. "
+                    "Review all perspectives below. Be concise — only address "
+                    "disagreements, gaps, and strengthen the strongest ideas.\n\n"
+                    f"All perspectives:\n{all_perspectives}"
+                ),
+            )
+            return aid, out
+
+        discuss_results = await asyncio.gather(
+            *[_run_discuss(aid) for aid in agent_ids],
+        )
+        discussion_outputs: dict[str, str] = {aid: out for aid, out in discuss_results}
+
+        # === Phase 3: Synthesis ===
+        synth = await self._synthesize_stage(agent_ids[0], discussion_outputs, stage_name)
         self.phase_outputs[f"STAGE_{stage_name.upper()}"] = synth
-        return outputs
+        return discussion_outputs
 
     async def _synthesize_stage(
         self, lead_agent_id: str, outputs: dict[str, str], stage_name: str,
@@ -569,69 +686,60 @@ class AgentTeam:
         if not thinker_output:
             return
 
-        # Model routing for debate agents
-        original_model, did_swap = self._swap_model_for_agent("CHALLENGER")
+        # Run challenger with model_override (parallel-safe)
+        temperature = MODE_TEMPERATURES.get(self.mode, 0.3)
+        challenge_messages = [
+            {"role": "user", "content": self.original_plan},
+            {"role": "assistant", "content": thinker_output},
+            {"role": "user", "content": "Please critically review the above analysis. Find weaknesses, gaps, and suggest improvements."},
+        ]
 
-        try:
-            # Run challenger
-            temperature = MODE_TEMPERATURES.get(self.mode, 0.3)
-            challenge_messages = [
-                {"role": "user", "content": self.original_plan},
-                {"role": "assistant", "content": thinker_output},
-                {"role": "user", "content": "Please critically review the above analysis. Find weaknesses, gaps, and suggest improvements."},
-            ]
+        challenger_output = await stream_llm(
+            system_prompt=DEBATE_CHALLENGER_PROMPT,
+            messages=challenge_messages,
+            ws=self.ws,
+            agent_name="CHALLENGER",
+            agent_color="#ff6b6b",
+            temperature=temperature + 0.1,
+            token_tracker=self.token_tracker,
+            model_override=self._get_model_for_agent("CHALLENGER"),
+        )
+        self.phase_outputs["CHALLENGER"] = challenger_output
 
-            challenger_output = await stream_llm(
-                system_prompt=DEBATE_CHALLENGER_PROMPT,
-                messages=challenge_messages,
-                ws=self.ws,
-                agent_name="CHALLENGER",
-                agent_color="#ff6b6b",
-                temperature=temperature + 0.1,
-                token_tracker=self.token_tracker,
-            )
-            self.phase_outputs["CHALLENGER"] = challenger_output
-
-            await self.ws.send_json({
-                "type": "agent_output",
-                "agent": "CHALLENGER",
-                "content": challenger_output[:2000],
-            })
-        finally:
-            self._restore_model(original_model, did_swap)
+        await self.ws.send_json({
+            "type": "agent_output",
+            "agent": "CHALLENGER",
+            "content": challenger_output[:2000],
+        })
 
         # THINKER responds to challenges
         await self.send_status("Phase 2c: Refining analysis based on debate...", "debate")
 
-        original_model2, did_swap2 = self._swap_model_for_agent("THINKER_REFINED")
+        response_messages = [
+            {"role": "user", "content": self.original_plan},
+            {"role": "assistant", "content": thinker_output},
+            {"role": "user", "content": f"A critical reviewer has raised these challenges:\n\n{challenger_output}\n\nPlease respond to each challenge and produce a refined analysis."},
+        ]
 
-        try:
-            response_messages = [
-                {"role": "user", "content": self.original_plan},
-                {"role": "assistant", "content": thinker_output},
-                {"role": "user", "content": f"A critical reviewer has raised these challenges:\n\n{challenger_output}\n\nPlease respond to each challenge and produce a refined analysis."},
-            ]
+        refined_output = await stream_llm(
+            system_prompt=DEBATE_RESPONSE_PROMPT,
+            messages=response_messages,
+            ws=self.ws,
+            agent_name="THINKER_REFINED",
+            agent_color="#c084fc",
+            temperature=temperature,
+            token_tracker=self.token_tracker,
+            model_override=self._get_model_for_agent("THINKER_REFINED"),
+        )
 
-            refined_output = await stream_llm(
-                system_prompt=DEBATE_RESPONSE_PROMPT,
-                messages=response_messages,
-                ws=self.ws,
-                agent_name="THINKER_REFINED",
-                agent_color="#c084fc",
-                temperature=temperature,
-                token_tracker=self.token_tracker,
-            )
+        # Replace THINKER output with refined version
+        self.phase_outputs["THINKER"] = refined_output
 
-            # Replace THINKER output with refined version
-            self.phase_outputs["THINKER"] = refined_output
-
-            await self.ws.send_json({
-                "type": "agent_output",
-                "agent": "THINKER_REFINED",
-                "content": refined_output[:2000],
-            })
-        finally:
-            self._restore_model(original_model2, did_swap2)
+        await self.ws.send_json({
+            "type": "agent_output",
+            "agent": "THINKER_REFINED",
+            "content": refined_output[:2000],
+        })
 
     async def run_planner(self):
         await self.send_status("Phase 3: Planning...", "plan")

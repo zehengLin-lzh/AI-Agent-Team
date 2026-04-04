@@ -2,6 +2,55 @@
 
 ---
 
+## v7.0.0 — Parallel Agents + Subagent Spawning (2026-04-04)
+
+### Summary
+
+Multi-agent stages now execute in parallel with a think→discuss→synthesis model instead of sequential discussion. Agents in COMPLEX tasks can spawn lightweight subagents for focused research. Model routing is now per-call (parallel-safe) instead of global state mutation.
+
+### Parallel Execution Model
+- **Parallel think**: All agents in a stage run simultaneously and independently
+- **Discussion round**: All agents see everyone's Phase 1 output, then discuss in parallel (concise: only disagreements/gaps)
+- **Synthesis**: Lead agent synthesizes all discussion outputs into stage conclusion
+- SIMPLE tasks unchanged (single-agent stages); parallel applies to MEDIUM/COMPLEX multi-agent stages
+
+### Subagent Mechanism
+- Agents in COMPLEX tasks can spawn 1 subagent via `---SUBAGENT_REQUEST---` block
+- Subagent uses FAST_MODEL (7B), non-streaming, limited token budget
+- Results are integrated back into the parent agent's output via a follow-up LLM call
+- Configurable: `MAX_SUBAGENTS_PER_AGENT`, `SUBAGENT_MAX_INPUT_TOKENS`, `SUBAGENT_MAX_OUTPUT_TOKENS`
+
+### Parallel-Safe Model Routing
+- Added `model_override` parameter to all LLM provider `stream()` and `call()` methods
+- `_get_model_for_agent()` resolves model name without mutating global state
+- Replaces old `_swap_model_for_agent()` / `_restore_model()` pattern (kept for compat but deprecated)
+- Safe for `asyncio.gather()` — multiple agents can use different models simultaneously
+
+### WebSocket Streaming
+- Added `_LockedWebSocket` wrapper for serialized `send_json` calls during parallel streaming
+- CLI handles interleaved agent tokens with automatic switch markers (`├─ AgentName:`)
+- Per-agent buffer tracking for clean parallel output display
+
+### Token Cost Control
+- New config constants: `DISCUSSION_MAX_OUTPUT_TOKENS`, `MAX_SUBAGENTS_PER_AGENT`, `SUBAGENT_MAX_INPUT_TOKENS`, `SUBAGENT_MAX_OUTPUT_TOKENS`
+- `SessionTokenTracker.estimate_cost()` — API cost estimation for known model pricing
+- Cost multiplier: SIMPLE 1.0x, MEDIUM ~1.6x, COMPLEX ~2.2x (due to discussion round + subagents)
+
+### Files Modified
+- `llm/base.py` — `model_override` param on ABC, `estimate_cost()` method
+- `llm/registry.py` — `model_override` passthrough in `stream_llm()`, `call_llm()`
+- `llm/ollama_provider.py` — `model_override` support
+- `llm/openai_compat.py` — `model_override` support
+- `llm/huggingface_provider.py` — `model_override` support
+- `llm/providers.py` — `model_override` in Anthropic overrides
+- `agents/runner.py` — Parallel `run_stage()`, `_LockedWebSocket`, `_get_model_for_agent()`, subagent mechanism
+- `agents/http_runner.py` — Parallel stage execution, `_get_model_for_agent()`
+- `agents/definitions.py` — `SUBAGENT_INSTRUCTION` prompt constant
+- `config.py` — New token/subagent limit constants
+- `cli/interactive.py` — Parallel streaming display with agent switch markers
+
+---
+
 ## v6.2.1 — Portable MCP Config + Error Visibility (2026-03-26)
 
 ### Summary

@@ -634,23 +634,46 @@ async def stream_conversation(
 
                 elif t == "agent_start":
                     spinner.stop()
-                    current_agent = msg.get("agent", "")
+                    agent_id = msg.get("agent", "")
                     model = msg.get("model", state.model)
                     display_name = msg.get("display_name", "")
+                    # Track per-agent state for parallel streaming
+                    if not hasattr(self, '_agent_buffers'):
+                        self._agent_buffers: dict[str, str] = {}
+                        self._agent_token_received: dict[str, bool] = {}
+                    self._agent_buffers[agent_id] = ""
+                    self._agent_token_received[agent_id] = False
+                    current_agent = agent_id
                     current_buffer = ""
                     at_line_start = True
                     first_token_received = False
-                    render_agent_header(current_agent, model, display_name=display_name)
-                    # Show spinner while waiting for first token
-                    short_name = display_name or current_agent
+                    render_agent_header(agent_id, model, display_name=display_name)
+                    short_name = display_name or agent_id
                     spinner.start(f"{short_name} thinking")
 
                 elif t == "token":
-                    if not first_token_received:
+                    token_agent = msg.get("agent", current_agent)
+                    if not first_token_received or (
+                        token_agent != current_agent and token_agent
+                    ):
                         spinner.stop()
                         first_token_received = True
+                        # Parallel: if token is from a different agent, show a switch marker
+                        if token_agent != current_agent and current_agent:
+                            if current_buffer and not current_buffer.endswith("\n"):
+                                sys.stdout.write("\n")
+                            spec = None
+                            try:
+                                from agent_team.agents.definitions import AGENT_REGISTRY_MAP
+                                spec = AGENT_REGISTRY_MAP.get(token_agent)
+                            except Exception:
+                                pass
+                            switch_name = spec.name if spec else token_agent
+                            console.print(f"[dim]├─ {switch_name}:[/]")
+                            current_agent = token_agent
+                            current_buffer = ""
+                            at_line_start = True
                     token = msg.get("content", "")
-                    # Stream with left gutter (│) for Claude Code-style output
                     for ch in token:
                         if at_line_start:
                             sys.stdout.write("\033[2m│\033[0m ")
@@ -660,25 +683,35 @@ async def stream_conversation(
                             at_line_start = True
                     sys.stdout.flush()
                     current_buffer += token
+                    if hasattr(self, '_agent_buffers') and token_agent:
+                        self._agent_buffers[token_agent] = self._agent_buffers.get(token_agent, "") + token
 
                 elif t == "agent_done":
                     spinner.stop()
-                    if current_buffer:
-                        if not current_buffer.endswith("\n"):
-                            sys.stdout.write("\n")
+                    done_agent = msg.get("agent", current_agent)
+                    # If finishing a non-current agent in parallel, don't disturb display
+                    buf = current_buffer if done_agent == current_agent else ""
+                    if buf and not buf.endswith("\n"):
+                        sys.stdout.write("\n")
                         sys.stdout.flush()
-                    # Close the agent box with ╰─ and compact stats in dim
                     ts = msg.get("token_stats")
+                    done_name = done_agent or ""
                     if ts and ts.get("total_tokens", 0) > 0:
                         console.print(
-                            f"[dim]╰─ {ts['total_tokens']} tokens "
+                            f"[dim]╰─ {done_name} {ts['total_tokens']} tokens "
                             f"({ts.get('tokens_per_second', 0):.1f} t/s)[/]"
                         )
                     else:
-                        console.print("[dim]╰─[/]")
-                    current_agent = None
+                        console.print(f"[dim]╰─ {done_name}[/]")
+                    if done_agent == current_agent:
+                        current_agent = None
+                        current_buffer = ""
                     at_line_start = True
                     first_token_received = False
+                    # Clean up per-agent tracking
+                    if hasattr(self, '_agent_buffers'):
+                        self._agent_buffers.pop(done_agent, None)
+                        self._agent_token_received.pop(done_agent, None)
 
                 elif t == "memory_context":
                     results = msg.get("results", [])
