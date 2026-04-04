@@ -74,7 +74,7 @@ class AgentTeam:
         self.token_tracker = SessionTokenTracker()
 
     async def send_status(self, message: str, phase: str = ""):
-        await self.send_json({
+        await self.ws.send_json({
             "type": "status",
             "message": message,
             "phase": phase,
