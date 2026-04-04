@@ -619,6 +619,7 @@ async def stream_conversation(
             at_line_start = True  # Track gutter state for │ prefix
             spinner = LoadingSpinner()
             first_token_received = False
+            agent_buffers: dict[str, str] = {}  # Per-agent buffers for parallel streaming
 
             async for raw in ws:
                 msg = json.loads(raw)
@@ -637,12 +638,7 @@ async def stream_conversation(
                     agent_id = msg.get("agent", "")
                     model = msg.get("model", state.model)
                     display_name = msg.get("display_name", "")
-                    # Track per-agent state for parallel streaming
-                    if not hasattr(self, '_agent_buffers'):
-                        self._agent_buffers: dict[str, str] = {}
-                        self._agent_token_received: dict[str, bool] = {}
-                    self._agent_buffers[agent_id] = ""
-                    self._agent_token_received[agent_id] = False
+                    agent_buffers[agent_id] = ""
                     current_agent = agent_id
                     current_buffer = ""
                     at_line_start = True
@@ -683,8 +679,8 @@ async def stream_conversation(
                             at_line_start = True
                     sys.stdout.flush()
                     current_buffer += token
-                    if hasattr(self, '_agent_buffers') and token_agent:
-                        self._agent_buffers[token_agent] = self._agent_buffers.get(token_agent, "") + token
+                    if token_agent:
+                        agent_buffers[token_agent] = agent_buffers.get(token_agent, "") + token
 
                 elif t == "agent_done":
                     spinner.stop()
@@ -708,10 +704,7 @@ async def stream_conversation(
                         current_buffer = ""
                     at_line_start = True
                     first_token_received = False
-                    # Clean up per-agent tracking
-                    if hasattr(self, '_agent_buffers'):
-                        self._agent_buffers.pop(done_agent, None)
-                        self._agent_token_received.pop(done_agent, None)
+                    agent_buffers.pop(done_agent, None)
 
                 elif t == "memory_context":
                     results = msg.get("results", [])
