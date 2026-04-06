@@ -2,6 +2,29 @@
 
 ---
 
+## v7.1.2 — Model Availability Validation + Fallback (2026-04-06)
+
+### Summary
+
+Fixed THINK_SOREN and PLAN_ATLAS producing 0/0/0 tokens when the configured model (e.g., `qwen3:14b`) is not installed on the host machine. The pipeline now validates model availability at startup and automatically falls back to the base model with a warning.
+
+### Root Cause
+
+`config.py` hardcodes `THINKING_MODEL = "qwen3:14b"` for thinker/planner agents. On machines with different models (e.g., `qwen2.5-coder:14b` only), Ollama returned HTTP 404 for the missing model. The streaming code didn't check HTTP status, so the error was silently swallowed — agents showed 0/0/0 with no visible error.
+
+### Fixes
+
+- **Model validation at pipeline startup** — `_validate_model_routing()` checks all routed models against `ollama list` before any agent runs. Missing models get an automatic fallback to the base model (`qwen2.5-coder:7b`) with a visible warning message.
+- **HTTP status check in `stream()`** — Ollama streaming now checks `response.status_code != 200` and raises a proper error, caught by the existing exception handler to produce `[LLM_ERROR: ...]` sentinel.
+- **Instance-level model overrides** — Fallbacks are stored per-session (`self._model_overrides`), not in global routing dicts, so concurrent sessions are unaffected.
+
+### Files Modified
+
+- `agents/runner.py` — `_validate_model_routing()`, `_model_overrides` dict, updated `_get_model_for_agent()`
+- `llm/ollama_provider.py` — HTTP status check in `stream()`
+
+---
+
 ## v7.1.1 — Fix Large-Schema Database Context Overflow (2026-04-06)
 
 ### Summary

@@ -118,6 +118,13 @@ class OllamaProvider(LLMProvider):
         try:
             client = await _get_client()
             async with client.stream("POST", self._chat_url, json=payload) as response:
+                if response.status_code != 200:
+                    error_body = ""
+                    async for line in response.aiter_lines():
+                        error_body += line
+                    raise RuntimeError(
+                        f"Ollama returned {response.status_code}: {error_body[:200]}"
+                    )
                 async for line in response.aiter_lines():
                     if not line:
                         continue

@@ -73,6 +73,7 @@ class AgentTeam:
         self.mcp_tools_prompt = ""
         self.mcp_registry = None
         self.token_tracker = SessionTokenTracker()
+        self._model_overrides: dict[str, str] = {}  # Fallback overrides for unavailable models
 
     async def send_status(self, message: str, phase: str = ""):
         await self.ws.send_json({
@@ -315,10 +316,56 @@ class AgentTeam:
     def _get_model_for_agent(self, agent_name: str) -> str | None:
         """Resolve the routed model name for an agent without mutating global state."""
         if self.complexity == TaskComplexity.SIMPLE:
-            return SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+            model = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
         elif self.complexity == TaskComplexity.MEDIUM:
-            return MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
-        return MODEL_ROUTING.get(agent_name)
+            model = MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
+        else:
+            model = MODEL_ROUTING.get(agent_name)
+        # Apply fallback overrides for models not available locally
+        if model and model in self._model_overrides:
+            return self._model_overrides[model]
+        return model
+
+    async def _validate_model_routing(self):
+        """Check that all routed models are available in Ollama.
+
+        If a model is not found, register a fallback override to the base MODEL.
+        Only runs for the Ollama provider (local models).
+        """
+        try:
+            from agent_team.llm.registry import get_active_provider
+            provider = get_active_provider()
+            if provider.name != "ollama":
+                return
+
+            available = await provider.list_models()
+            if not available:
+                return
+
+            # Collect all unique models needed for the current routing
+            if self.complexity == TaskComplexity.SIMPLE:
+                routing = SIMPLE_MODEL_ROUTING
+            elif self.complexity == TaskComplexity.MEDIUM:
+                routing = MEDIUM_MODEL_ROUTING
+            else:
+                routing = MODEL_ROUTING
+
+            needed = {v for v in routing.values() if v}
+            base_model = MODEL
+
+            for model in needed:
+                if model not in available:
+                    self._model_overrides[model] = base_model
+                    await self.ws.send_json({
+                        "type": "status",
+                        "phase": "setup",
+                        "message": (
+                            f"Model '{model}' not found, "
+                            f"falling back to '{base_model}'"
+                        ),
+                    })
+        except Exception:
+            pass
 
     async def run_agent(
         self, agent_name: str,
@@ -1044,6 +1091,9 @@ class AgentTeam:
                 "phase": "complexity",
                 "message": f"Task complexity: {self.complexity.value.upper()} → {len(phase_order)} phases",
             })
+
+            # Pre-session: validate model availability
+            await self._validate_model_routing()
 
             # -- Main pipeline loop --
             _LEGACY_HANDLERS = {
