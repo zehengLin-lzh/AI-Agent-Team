@@ -10,18 +10,20 @@ Fixed a critical bug where databases with many tables (e.g., 45) caused the enti
 
 ### Root Cause
 
-Ollama API calls did not set `num_ctx` (context window size), so Ollama used the model's default (as low as 2048 tokens). With a large database schema injected into the prompt (~5,000+ total tokens), the input was silently truncated, causing the model to see garbled text and produce meaningless output. This cascaded to downstream agents (thinker, planner) which received empty context and also produced nothing.
+Two issues combined:
+1. **Ollama `num_ctx` not set** — Ollama used the model's default context window (as low as 2048 tokens). With a 45-table schema, the prompt exceeded this and was silently truncated, producing meaningless output.
+2. **Fixed large `num_ctx` causes timeouts** — Setting `num_ctx=32768` fixes the truncation but causes Ollama to allocate a huge KV cache that times out on 14B+ models. The thinker/planner (qwen3:14b) would hang and produce 0 tokens.
 
 ### Fixes
 
-- **Set `num_ctx: 32768` explicitly** in both `stream()` and `call()` Ollama methods — ensures the model has sufficient context window for any realistic prompt assembly
+- **Dynamic `num_ctx` calculation** — `_calc_num_ctx()` sizes the context window based on the actual prompt: `prompt_tokens + num_predict + 512`, rounded up to nearest 2048. A 5K-token prompt gets `num_ctx≈10240` (fast), not 32768 (timeout). Tested end-to-end with 7b and 14b models.
 - **Relevance-ranked schema discovery** — instead of describing the first 10 alphabetical tables (which for 45 tables meant describing `address`–`data_sync` while skipping `users`), tables are now scored by relevance to the user's query. Exact substring matches score highest (e.g., "users" in "fetch active users")
 - **Error visibility** — Ollama streaming errors now return `[LLM_ERROR: ...]` sentinel instead of silent empty string, preventing cascading failures
 
 ### Files Modified
 
-- `config.py` — Added `OLLAMA_NUM_CTX = 32768`
-- `llm/ollama_provider.py` — Added `num_ctx` to options, error sentinel in exception handler
+- `config.py` — Added `OLLAMA_NUM_CTX = 16384` (fallback constant)
+- `llm/ollama_provider.py` — Dynamic `_calc_num_ctx()`, error sentinel in exception handler
 - `agents/runner.py` — Relevance-ranked table selection in `_auto_discover_schema()`
 
 ---

@@ -3,7 +3,7 @@ import json
 import httpx
 from fastapi import WebSocket
 
-from agent_team.config import OLLAMA_URL, OLLAMA_BASE_URL, MODEL, OLLAMA_NUM_CTX
+from agent_team.config import OLLAMA_URL, OLLAMA_BASE_URL, MODEL
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
 
 _shared_client: httpx.AsyncClient | None = None
@@ -57,6 +57,23 @@ class OllamaProvider(LLMProvider):
         except Exception as e:
             return {"status": "error", "provider": "ollama", "error": str(e)}
 
+    @staticmethod
+    def _calc_num_ctx(system_prompt: str, messages: list[dict], num_predict: int = 4096) -> int:
+        """Calculate num_ctx based on actual prompt size.
+
+        Using a fixed large num_ctx (e.g. 32768) causes Ollama to allocate
+        a huge KV cache, which can timeout on 14B+ models.  Instead, size
+        the context window to fit the actual prompt + generation headroom.
+        """
+        prompt_chars = len(system_prompt) + sum(
+            len(m.get("content", "")) for m in messages
+        )
+        prompt_tokens = prompt_chars // 4  # rough estimate
+        # prompt + generation + headroom, rounded up to nearest 2048
+        needed = prompt_tokens + num_predict + 512
+        aligned = ((needed + 2047) // 2048) * 2048
+        return max(aligned, 4096)  # floor at 4096
+
     async def stream(
         self,
         system_prompt: str,
@@ -71,17 +88,19 @@ class OllamaProvider(LLMProvider):
     ) -> str:
         model = model_override or self._active_model
         full_response = ""
+        all_messages = [
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ]
+        num_ctx = self._calc_num_ctx(system_prompt, messages)
         payload = {
             "model": model,
             "stream": True,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                *messages,
-            ],
+            "messages": all_messages,
             "options": {
                 "temperature": temperature,
                 "num_predict": 4096,
-                "num_ctx": OLLAMA_NUM_CTX,
+                "num_ctx": num_ctx,
                 "top_p": 0.9,
             },
         }
@@ -151,6 +170,7 @@ class OllamaProvider(LLMProvider):
         model_override: str | None = None,
     ) -> str:
         model = model_override or self._active_model
+        num_ctx = self._calc_num_ctx(system_prompt, messages)
         payload = {
             "model": model,
             "stream": False,
@@ -161,7 +181,7 @@ class OllamaProvider(LLMProvider):
             "options": {
                 "temperature": temperature,
                 "num_predict": 4096,
-                "num_ctx": OLLAMA_NUM_CTX,
+                "num_ctx": num_ctx,
                 "top_p": 0.9,
             },
         }
