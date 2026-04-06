@@ -149,6 +149,18 @@ class MCPRegistry:
         lines.append('{"param1": "value1", "param2": "value2"}')
         lines.append("--- END TOOL_CALL ---")
         lines.append("```\n")
+        lines.append("## Tool Usage Guidelines\n")
+        lines.append("CRITICAL — You MUST follow a TOOL-FIRST approach:")
+        lines.append("1. When you need factual information that a tool can provide — USE the tool, do NOT ask the user")
+        lines.append("2. Before asking the user ANY question, check: can one of your available tools answer this?")
+        lines.append("3. You can make multiple tool calls in one response — chain them for multi-step discovery")
+        lines.append("4. Only ask the user (WAITING_FOR_USER) when NO tool can answer: subjective preferences, business decisions, ambiguous intent")
+        lines.append("5. After receiving tool results, reason about them and make follow-up tool calls if needed\n")
+        lines.append("Pattern: discover → inspect → act → verify")
+        lines.append("  Example: list available resources → describe the relevant one → perform the operation → check results\n")
+        lines.append("Anti-pattern: asking the user for information a tool can provide")
+        lines.append("  Bad: WAITING_FOR_USER: 'What table should I query?' → Use list/describe tools to find out!")
+        lines.append("  Bad: WAITING_FOR_USER: 'What's the schema?' → Use discovery tools to inspect it!\n")
         lines.append("Available tools:\n")
 
         for tool in tools:

@@ -2,6 +2,41 @@
 
 ---
 
+## v7.1.0 — Tool-First MCP Agent Architecture (2026-04-06)
+
+### Summary
+
+Agents now follow a tool-first approach: when MCP tools are available, agents use them to discover information autonomously instead of asking the user. This works generically for any MCP server (database, filesystem, API, etc.) — adding a new MCP server automatically gets tool-first behavior without code changes.
+
+### Tool-First Agent Prompts
+- Updated `_ORCHESTRATOR_BASE`, `_SIMPLE_ORCHESTRATOR`, `_THINKER_BASE`, `_PLANNER_BASE` to prioritize tool usage over asking the user
+- Old: "If ANYTHING is unclear, you MUST ask the user"
+- New: "If MCP tools are available, USE them to discover information before asking the user"
+- WAITING_FOR_USER now reserved for intent clarification only (business logic, preferences, ambiguity)
+- Added generic "Tool Usage Guidelines" to `format_tools_prompt()` with discovery pattern and anti-patterns
+
+### Tool Result Feedback Loop
+- `run_agent()` now supports iterative tool use: agent generates tool calls → tools execute → results fed back to LLM → agent reasons and continues
+- Up to `MAX_TOOL_ROUNDS=3` iterations per agent (configurable in `config.py`)
+- Round 0 streams to UI; follow-up rounds use `call_llm` (non-streaming, faster)
+- Token budget guard prevents context overflow across rounds
+- Loop only activates when MCP tools are present — non-MCP tasks unaffected
+- Parallel-safe: each agent in `asyncio.gather` runs its own independent feedback loop
+
+### Enhanced Test Database
+- Expanded `sample.db` from 4 tables/38 rows to 8 tables/800+ rows
+- New tables: departments, department_members (M:N), appointments, billing, audit_logs
+- Complex relationships: self-references (manager_id), many-to-many, cascading FKs
+- Edge cases: NULL values, inactive/suspended users, $0 billing, orphaned audit logs
+
+### Files Modified
+- `agents/definitions.py` — Tool-first prompt instructions in orchestrator, thinker, planner
+- `mcp/registry.py` — Generic tool-first guidelines in `format_tools_prompt()`
+- `agents/runner.py` — Tool feedback loop in `run_agent()`, `MAX_TOOL_ROUNDS` import
+- `config.py` — `MAX_TOOL_ROUNDS` constant
+
+---
+
 ## v7.0.0 — Parallel Agents + Subagent Spawning (2026-04-04)
 
 ### Summary
@@ -28,13 +63,19 @@ Multi-agent stages now execute in parallel with a think→discuss→synthesis mo
 
 ### WebSocket Streaming
 - Added `_LockedWebSocket` wrapper for serialized `send_json` calls during parallel streaming
-- CLI handles interleaved agent tokens with automatic switch markers (`├─ AgentName:`)
-- Per-agent buffer tracking for clean parallel output display
+- CLI buffered display: first agent streams live, others are silently buffered and rendered sequentially after each completes — no interleaved/garbled output
+- Both `interactive.py` and `classic.py` CLI modes support parallel-safe display
 
 ### Token Cost Control
 - New config constants: `DISCUSSION_MAX_OUTPUT_TOKENS`, `MAX_SUBAGENTS_PER_AGENT`, `SUBAGENT_MAX_INPUT_TOKENS`, `SUBAGENT_MAX_OUTPUT_TOKENS`
 - `SessionTokenTracker.estimate_cost()` — API cost estimation for known model pricing
 - Cost multiplier: SIMPLE 1.0x, MEDIUM ~1.6x, COMPLEX ~2.2x (due to discussion round + subagents)
+
+### QA Bug Fixes (8 bugs found and resolved)
+- **P0 CRITICAL**: Fixed WebSocket `receive_text()` concurrency crash during parallel agent execution — `handle_user_question()` was called inside `asyncio.gather()`, causing "cannot call recv" error on MEDIUM/COMPLEX tasks. Moved user-question handling to sequential post-gather phase. (`agents/runner.py`)
+- **P1**: Bumped version strings from 6.2.0 → 7.0.0 across `pyproject.toml`, `interactive.py`, `server/app.py`, `mcp/client.py`, `classic.py`
+- **P2**: Added plan input validation to WebSocket endpoint — empty plans and plans exceeding `MAX_INPUT_LENGTH` (50000) are now rejected with an error message. Wired up existing `validate_plan_input()` from `security/validator.py`. (`server/app.py`)
+- **P3**: Updated stale help text in classic CLI ("Local Agent Team v2" → "Agent Team v7.0")
 
 ### Files Modified
 - `llm/base.py` — `model_override` param on ABC, `estimate_cost()` method
@@ -47,7 +88,10 @@ Multi-agent stages now execute in parallel with a think→discuss→synthesis mo
 - `agents/http_runner.py` — Parallel stage execution, `_get_model_for_agent()`
 - `agents/definitions.py` — `SUBAGENT_INSTRUCTION` prompt constant
 - `config.py` — New token/subagent limit constants
-- `cli/interactive.py` — Parallel streaming display with agent switch markers
+- `cli/interactive.py` — Buffered parallel streaming display (active agent live, others queued)
+- `cli/classic.py` — Same parallel buffering for classic CLI mode, updated help text
+- `server/app.py` — Plan input validation via `validate_plan_input()`, version bump
+- `mcp/client.py` — clientInfo version bump
 
 ---
 

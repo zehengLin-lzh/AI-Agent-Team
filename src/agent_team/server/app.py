@@ -20,8 +20,9 @@ from agent_team.agents.http_runner import (
 )
 from agent_team.agents.definitions import AgentMode
 from agent_team.plans.storage import save_plan_markdown
+from agent_team.security.validator import validate_plan_input, ValidationError
 
-app = FastAPI(title="Mat Agent Team v6.2")
+app = FastAPI(title="Mat Agent Team v7.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,6 +40,15 @@ async def websocket_endpoint(websocket: WebSocket):
         raw = await websocket.receive_text()
         data = json.loads(raw)
         if data.get("type") == "start":
+            # Validate plan input
+            try:
+                plan_content = validate_plan_input(data.get("content", ""))
+                data["content"] = plan_content
+            except ValidationError as ve:
+                await websocket.send_json({"type": "error", "content": str(ve)})
+                await websocket.close()
+                return
+
             team = AgentTeam(
                 websocket,
                 execution_path=data.get("execution_path"),

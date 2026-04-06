@@ -24,7 +24,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError as WsConnectionClosedError
 
 
-app = typer.Typer(help="Local Agent Team v2 CLI — self-learning AI agent team")
+app = typer.Typer(help="Agent Team v7.0 CLI — self-learning AI agent team")
 
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 
@@ -115,6 +115,8 @@ async def _stream(plan_text: str, mode: str, agent_mode: str, execution_path: Op
 
             current_agent = None
             agent_had_output = False
+            _classic_buffers: dict[str, dict] = {}
+            _classic_finished_q: list[str] = []
 
             async for raw in ws:
                 msg = json.loads(raw)
@@ -128,20 +130,58 @@ async def _stream(plan_text: str, mode: str, agent_mode: str, execution_path: Op
                     typer.echo(f"{'─' * 56}")
 
                 elif t == "agent_start":
-                    current_agent = msg.get("agent", "")
-                    agent_had_output = False
-                    typer.echo(f"\n[{current_agent}]\n", nl=False)
+                    agent_id = msg.get("agent", "")
+                    if current_agent is None:
+                        # First/only active agent — display live
+                        current_agent = agent_id
+                        agent_had_output = False
+                        typer.echo(f"\n[{current_agent}]\n", nl=False)
+                    else:
+                        # Parallel agent — buffer it
+                        _classic_buffers[agent_id] = {"tokens": "", "done": False, "stats": None}
 
                 elif t == "token":
-                    sys.stdout.write(msg.get("content", ""))
-                    sys.stdout.flush()
-                    agent_had_output = True
+                    token_agent = msg.get("agent", current_agent)
+                    token_content = msg.get("content", "")
+                    if token_agent == current_agent:
+                        sys.stdout.write(token_content)
+                        sys.stdout.flush()
+                        agent_had_output = True
+                    elif token_agent in _classic_buffers:
+                        _classic_buffers[token_agent]["tokens"] += token_content
 
                 elif t == "agent_done":
-                    if agent_had_output:
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
-                    current_agent = None
+                    done_agent = msg.get("agent", current_agent)
+                    if done_agent == current_agent:
+                        if agent_had_output:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                        current_agent = None
+                        # Flush agents that finished while active agent was displaying
+                        for aid in list(_classic_finished_q):
+                            buf = _classic_buffers.pop(aid, None)
+                            if buf:
+                                typer.echo(f"\n[{aid}]\n", nl=False)
+                                sys.stdout.write(buf["tokens"])
+                                if buf["tokens"]:
+                                    sys.stdout.write("\n")
+                                sys.stdout.flush()
+                        _classic_finished_q.clear()
+                        # Pick next running buffered agent
+                        running = [a for a, b in _classic_buffers.items() if not b["done"]]
+                        if running:
+                            next_aid = running[0]
+                            buf = _classic_buffers.pop(next_aid)
+                            current_agent = next_aid
+                            agent_had_output = bool(buf["tokens"])
+                            typer.echo(f"\n[{current_agent}]\n", nl=False)
+                            if buf["tokens"]:
+                                sys.stdout.write(buf["tokens"])
+                                sys.stdout.flush()
+                    else:
+                        if done_agent in _classic_buffers:
+                            _classic_buffers[done_agent]["done"] = True
+                            _classic_finished_q.append(done_agent)
 
                 elif t == "memory_context":
                     results = msg.get("results", [])

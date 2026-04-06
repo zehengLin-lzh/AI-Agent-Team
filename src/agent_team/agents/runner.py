@@ -5,7 +5,8 @@ import re
 from fastapi import WebSocket, WebSocketDisconnect
 
 from agent_team.config import (
-    MAX_FIX_LOOPS, REPO_ROOT, MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING,
+    MAX_FIX_LOOPS, MAX_TOOL_ROUNDS, MAX_CONTEXT_TOKENS, REPO_ROOT,
+    MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING,
     DISCUSSION_MAX_OUTPUT_TOKENS, MAX_SUBAGENTS_PER_AGENT,
     SUBAGENT_MAX_INPUT_TOKENS, SUBAGENT_MAX_OUTPUT_TOKENS, FAST_MODEL,
 )
@@ -339,32 +340,73 @@ class AgentTeam:
         # Model routing: resolve model for this agent (parallel-safe, no global mutation)
         routed_model = self._get_model_for_agent(agent_name)
 
-        output = await stream_llm(
-            system_prompt=system_prompt,
-            messages=messages,
-            ws=self.ws,
-            agent_name=agent_name,
-            agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
-            temperature=temperature,
-            token_tracker=self.token_tracker,
-            display_name=display_name,
-            model_override=routed_model,
-        )
+        # --- Tool feedback loop: stream → tool calls → see results → reason → repeat ---
+        from agent_team.mcp.tool_executor import execute_tool_calls
 
-        # Execute any MCP tool calls found in the output
-        if self.mcp_registry and "TOOL_CALL:" in output:
+        tool_round = 0
+        while True:
+            if tool_round == 0:
+                # Round 0: stream to UI as usual
+                output = await stream_llm(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    ws=self.ws,
+                    agent_name=agent_name,
+                    agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
+                    temperature=temperature,
+                    token_tracker=self.token_tracker,
+                    display_name=display_name,
+                    model_override=routed_model,
+                )
+            else:
+                # Follow-up rounds: non-streaming for speed
+                await self.send_status(
+                    f"{display_name} processing tool results (round {tool_round})...",
+                    "tool_feedback",
+                )
+                output = await call_llm(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    temperature=temperature,
+                    model_override=routed_model,
+                )
+
+            # Check for tool calls — exit loop if none
+            if not (self.mcp_registry and "TOOL_CALL:" in output):
+                break
+
+            tool_round += 1
+            if tool_round > MAX_TOOL_ROUNDS:
+                break  # Safety cap
+
             try:
-                from agent_team.mcp.tool_executor import execute_tool_calls
-                updated_output, exec_log = await execute_tool_calls(output, self.mcp_registry)
-                if exec_log:
-                    output = updated_output
-                    await self.ws.send_json({
-                        "type": "tool_results",
-                        "agent": agent_name,
-                        "tools_executed": exec_log,
-                    })
+                updated_output, exec_log = await execute_tool_calls(
+                    output, self.mcp_registry,
+                )
+                if not exec_log:
+                    break
+                output = updated_output
+                await self.ws.send_json({
+                    "type": "tool_results",
+                    "agent": agent_name,
+                    "tools_executed": exec_log,
+                })
+                # Feed tool results back to LLM as conversation continuation
+                messages.append({"role": "assistant", "content": output})
+                messages.append({"role": "user", "content": (
+                    "Tool results are embedded above as TOOL_RESULT blocks. "
+                    "Review the results and continue your analysis. "
+                    "Make additional tool calls if needed, or provide your final output."
+                )})
+                # Token budget guard
+                total_tokens = sum(
+                    len(m.get("content", "")) // 4 for m in messages
+                )
+                if total_tokens > MAX_CONTEXT_TOKENS:
+                    break
             except Exception:
-                pass
+                break
+        # --- End tool feedback loop ---
 
         # Execute subagent requests (COMPLEX tasks only, max 1 per agent)
         if self.complexity == TaskComplexity.COMPLEX:
@@ -530,12 +572,15 @@ class AgentTeam:
 
         async def _run_think(aid: str) -> tuple[str, str]:
             out = await self.run_agent(aid)
-            await self.handle_user_question(out, aid)
-            out = self.phase_outputs.get(aid, out)
             return aid, out
 
         think_results = await asyncio.gather(*[_run_think(aid) for aid in agent_ids])
         think_outputs: dict[str, str] = {aid: out for aid, out in think_results}
+
+        # Handle user questions sequentially after parallel phase completes
+        for aid, out in think_outputs.items():
+            await self.handle_user_question(out, aid)
+            think_outputs[aid] = self.phase_outputs.get(aid, out)
 
         # === Phase 2: Parallel discussion — each agent sees all Phase 1 outputs ===
         await self.send_status(

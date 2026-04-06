@@ -1,6 +1,6 @@
 [project]
 name = "ai-agent-team"
-version = "6.2.0"
+version = "7.0.0"
 description = "Self-learning local AI agent team for coding, thinking, brainstorming, architecture, and execution"
 requires-python = ">=3.12"
 dependencies = [

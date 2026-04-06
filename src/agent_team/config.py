@@ -64,6 +64,7 @@ MEDIUM_MODEL_ROUTING: dict[str, str] = {
 }
 
 MAX_FIX_LOOPS = 3
+MAX_TOOL_ROUNDS = 3  # Max tool-call → see-result → reason iterations per agent
 MAX_SUBAGENTS_PER_AGENT = 1
 SUBAGENT_MAX_INPUT_TOKENS = 2000
 SUBAGENT_MAX_OUTPUT_TOKENS = 1000

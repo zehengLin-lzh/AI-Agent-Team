@@ -66,7 +66,7 @@ class MCPStdioClient:
                 "capabilities": {},
                 "clientInfo": {
                     "name": "mat-agent-team",
-                    "version": "2.4.0",
+                    "version": "7.0.0",
                 },
             })
 
