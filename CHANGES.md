@@ -2,6 +2,30 @@
 
 ---
 
+## v7.1.1 — Fix Large-Schema Database Context Overflow (2026-04-06)
+
+### Summary
+
+Fixed a critical bug where databases with many tables (e.g., 45) caused the entire agent pipeline to produce empty outputs. Agents produced only 35 completion tokens (generic filler text) or 0 tokens, and the pipeline terminated without doing any work.
+
+### Root Cause
+
+Ollama API calls did not set `num_ctx` (context window size), so Ollama used the model's default (as low as 2048 tokens). With a large database schema injected into the prompt (~5,000+ total tokens), the input was silently truncated, causing the model to see garbled text and produce meaningless output. This cascaded to downstream agents (thinker, planner) which received empty context and also produced nothing.
+
+### Fixes
+
+- **Set `num_ctx: 32768` explicitly** in both `stream()` and `call()` Ollama methods — ensures the model has sufficient context window for any realistic prompt assembly
+- **Relevance-ranked schema discovery** — instead of describing the first 10 alphabetical tables (which for 45 tables meant describing `address`–`data_sync` while skipping `users`), tables are now scored by relevance to the user's query. Exact substring matches score highest (e.g., "users" in "fetch active users")
+- **Error visibility** — Ollama streaming errors now return `[LLM_ERROR: ...]` sentinel instead of silent empty string, preventing cascading failures
+
+### Files Modified
+
+- `config.py` — Added `OLLAMA_NUM_CTX = 32768`
+- `llm/ollama_provider.py` — Added `num_ctx` to options, error sentinel in exception handler
+- `agents/runner.py` — Relevance-ranked table selection in `_auto_discover_schema()`
+
+---
+
 ## v7.1.0 — Tool-First MCP Agent Architecture (2026-04-06)
 
 ### Summary

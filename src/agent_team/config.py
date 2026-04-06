@@ -78,3 +78,4 @@ MEMORY_DB_PATH = DATA_DIR / "memory.db"
 SESSIONS_DIR = DATA_DIR / "sessions"
 MAX_CONTEXT_TOKENS = 24000
 MAX_INPUT_LENGTH = 50000
+OLLAMA_NUM_CTX = 32768  # Ollama context window — must be set explicitly

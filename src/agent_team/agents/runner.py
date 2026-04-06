@@ -155,7 +155,28 @@ class AgentTeam:
         # Skip internal SQLite tables
         table_names = [t for t in table_names if not t.startswith("sqlite_")]
 
-        for tname in table_names[:10]:
+        # Rank tables by relevance to user query — ensures we describe
+        # the tables the user actually cares about, not just alphabetical first 10
+        query_lower = (self.original_plan or "").lower()
+        query_words = set(query_lower.split())
+
+        def _table_relevance(name: str) -> int:
+            score = 0
+            name_l = name.lower()
+            if name_l in query_lower:
+                score += 100  # Exact substring match
+            if name_l.rstrip("s") in query_lower or (name_l + "s") in query_lower:
+                score += 50  # Singular/plural variant
+            name_words = set(name_l.replace("_", " ").split())
+            overlap = name_words & query_words
+            if overlap:
+                score += len(overlap) * 10  # Word overlap
+            return score
+
+        scored = sorted(table_names, key=lambda t: (-_table_relevance(t), t))
+        max_describe = min(10, max(5, 20 - len(table_names) // 5))
+
+        for tname in scored[:max_describe]:
             desc = await self.mcp_registry.call_tool_by_name(
                 "db_describe_table",
                 {**conn_arg, "table": tname},

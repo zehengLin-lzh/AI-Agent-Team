@@ -3,7 +3,7 @@ import json
 import httpx
 from fastapi import WebSocket
 
-from agent_team.config import OLLAMA_URL, OLLAMA_BASE_URL, MODEL
+from agent_team.config import OLLAMA_URL, OLLAMA_BASE_URL, MODEL, OLLAMA_NUM_CTX
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
 
 _shared_client: httpx.AsyncClient | None = None
@@ -81,6 +81,7 @@ class OllamaProvider(LLMProvider):
             "options": {
                 "temperature": temperature,
                 "num_predict": 4096,
+                "num_ctx": OLLAMA_NUM_CTX,
                 "top_p": 0.9,
             },
         }
@@ -119,11 +120,13 @@ class OllamaProvider(LLMProvider):
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
+            error_msg = f"Ollama error: {str(e)}. Is Ollama running? Try: ollama serve"
             await ws.send_json({
                 "type": "error",
                 "agent": agent_name,
-                "content": f"Ollama error: {str(e)}. Is Ollama running? Try: ollama serve",
+                "content": error_msg,
             })
+            full_response = f"[LLM_ERROR: {error_msg}]"
 
         if token_tracker:
             token_tracker.record(agent_name, agent_stats)
@@ -158,6 +161,7 @@ class OllamaProvider(LLMProvider):
             "options": {
                 "temperature": temperature,
                 "num_predict": 4096,
+                "num_ctx": OLLAMA_NUM_CTX,
                 "top_p": 0.9,
             },
         }
