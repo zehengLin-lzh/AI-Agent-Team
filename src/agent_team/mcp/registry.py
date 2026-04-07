@@ -179,6 +179,20 @@ class MCPRegistry:
 
         return "\n".join(lines)
 
+    def get_capabilities(self) -> dict:
+        """Get categorized capabilities for all connected servers.
+
+        Returns:
+            dict mapping server_name → MCPCapabilities.
+        """
+        from agent_team.mcp.capabilities import categorize_tools
+        result = {}
+        for name, client in self._clients.items():
+            server_def = self.config.servers.get(name)
+            explicit = server_def.capabilities if server_def else None
+            result[name] = categorize_tools(name, client.get_tools(), explicit)
+        return result
+
     def find_tools_by_keywords(self, keywords: list[str]) -> list[MCPTool]:
         """Find tools whose name or description matches any of the keywords."""
         matches = []

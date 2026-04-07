@@ -17,6 +17,7 @@ class MCPServerDef:
     description: str = ""
     triggers: list[str] = field(default_factory=list)  # Keywords that suggest this server
     enabled: bool = True
+    capabilities: dict | None = None  # Optional explicit tool role mapping
 
     @property
     def is_remote(self) -> bool:
@@ -51,6 +52,7 @@ class MCPConfig:
                     description=sdef.get("description", ""),
                     triggers=sdef.get("triggers", []),
                     enabled=sdef.get("enabled", True),
+                    capabilities=sdef.get("capabilities"),
                 )
         except (json.JSONDecodeError, Exception):
             pass

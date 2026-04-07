@@ -82,31 +82,40 @@ class AgentTeam:
             "phase": phase,
         })
 
-    def _get_db_connection_args(self) -> dict:
-        """Read DB connection profile from MCP env config or fallback path.
+    # ── Generic MCP auto-discovery & auto-execution ──────────────────────────
+    #
+    # These replace the old database-specific functions with a capability-based
+    # system that works for ANY MCP server (database, filesystem, API, etc.).
 
-        Checks sources in order:
-        1. DB_CONFIG_PATH env var from any MCP server definition in mcp.json
-        2. ~/.config/local-db-mcp/connections.json (legacy fallback)
-        3. Empty dict (let MCP server use its default connection)
+    def _get_server_connection_args(self, server_name: str) -> dict:
+        """Read connection config for a specific MCP server from its env.
+
+        Checks the server's env for a config path (e.g. DB_CONFIG_PATH),
+        loads it, and returns the default connection profile.  Returns
+        empty dict if no config is found — the server will use its default.
         """
         from pathlib import Path as _Path
         import json as _json
 
+        if not self.mcp_registry:
+            return {}
+
+        server_def = self.mcp_registry.config.servers.get(server_name)
+        if not server_def:
+            return {}
+
+        # Look for *_CONFIG_PATH or *_CONNECTION env vars
         cfg_path = None
-        # 1) Read DB_CONFIG_PATH from MCP server env
-        if self.mcp_registry:
-            for srv in self.mcp_registry.config.servers.values():
-                env_path = srv.env.get("DB_CONFIG_PATH")
-                if env_path:
-                    cfg_path = _Path(env_path).expanduser()
-                    break
-        # 2) Fallback to well-known location
-        if cfg_path is None:
-            cfg_path = _Path.home() / ".config" / "local-db-mcp" / "connections.json"
+        for key, val in server_def.env.items():
+            if "CONFIG" in key.upper() or "CONNECTION" in key.upper():
+                cfg_path = _Path(val).expanduser()
+                break
+
+        if not cfg_path:
+            return {}
 
         try:
-            if cfg_path and cfg_path.exists():
+            if cfg_path.exists():
                 cfg = _json.loads(cfg_path.read_text())
                 conn = cfg.get("default_connection", "")
                 if not conn and cfg.get("profiles"):
@@ -117,167 +126,257 @@ class AgentTeam:
             pass
         return {}
 
-    async def _auto_discover_schema(self):
-        """Auto-discover database schema via MCP and inject into context.
+    async def _auto_discover_context(self):
+        """Auto-discover resources from ALL connected MCP servers.
 
-        Calls db_list_tables to find all tables, then db_describe_table for
-        each one.  The combined schema is prepended to memory_context so all
-        agents know the database structure without asking the user.
-        """
-        await self.send_status("Discovering database schema...", "setup")
+        For each server with discovery tools, calls them to enumerate
+        resources.  For each server with inspection tools, inspects the
+        most relevant resources.  Results are injected into memory_context
+        so agents have concrete data about the environment.
 
-        conn_arg = self._get_db_connection_args()
-
-        schema_parts: list[str] = []
-        tables_result = await self.mcp_registry.call_tool_by_name(
-            "db_list_tables", conn_arg
-        )
-        if not tables_result or tables_result.is_error:
-            err_msg = tables_result.content if tables_result else "No response"
-            await self.send_status(f"Schema discovery failed: {err_msg}", "setup")
-            return
-
-        schema_parts.append(f"## Tables\n{tables_result.content}")
-
-        # Extract table names from markdown table — first column only
-        # Format: | table_name | columns | rows |
-        import re as _re
-        # Match first cell after row-starting pipe, skip header/separator rows
-        table_names = []
-        for line in tables_result.content.splitlines():
-            line = line.strip()
-            if not line.startswith("|") or "---" in line:
-                continue
-            cells = [c.strip() for c in line.split("|") if c.strip()]
-            if cells and cells[0].isidentifier() and cells[0].lower() not in (
-                "table", "name", "table_name",
-            ):
-                table_names.append(cells[0])
-        # Skip internal SQLite tables
-        table_names = [t for t in table_names if not t.startswith("sqlite_")]
-
-        # Rank tables by relevance to user query — ensures we describe
-        # the tables the user actually cares about, not just alphabetical first 10
-        query_lower = (self.original_plan or "").lower()
-        query_words = set(query_lower.split())
-
-        def _table_relevance(name: str) -> int:
-            score = 0
-            name_l = name.lower()
-            if name_l in query_lower:
-                score += 100  # Exact substring match
-            if name_l.rstrip("s") in query_lower or (name_l + "s") in query_lower:
-                score += 50  # Singular/plural variant
-            name_words = set(name_l.replace("_", " ").split())
-            overlap = name_words & query_words
-            if overlap:
-                score += len(overlap) * 10  # Word overlap
-            return score
-
-        scored = sorted(table_names, key=lambda t: (-_table_relevance(t), t))
-        max_describe = min(10, max(5, 20 - len(table_names) // 5))
-
-        for tname in scored[:max_describe]:
-            desc = await self.mcp_registry.call_tool_by_name(
-                "db_describe_table",
-                {**conn_arg, "table": tname},
-            )
-            if desc and not desc.is_error:
-                schema_parts.append(f"## {tname}\n{desc.content}")
-
-        if schema_parts:
-            schema_ctx = (
-                "Database schema (auto-discovered via MCP):\n\n"
-                + "\n\n".join(schema_parts)
-            )
-            if self.memory_context:
-                self.memory_context = f"{schema_ctx}\n\n{self.memory_context}"
-            else:
-                self.memory_context = schema_ctx
-            await self.ws.send_json({
-                "type": "status",
-                "phase": "setup",
-                "message": f"Schema discovered: {len(table_names)} tables ({', '.join(table_names)})",
-            })
-
-    async def _auto_execute_db_queries(self, planner_output: str):
-        """Extract SQL queries from planner output and auto-execute via MCP.
-
-        Small models don't reliably generate TOOL_CALL blocks, so we extract
-        SQL from code blocks in the planner output and run them directly.
-        Results are sent to the CLI as tool_results.
+        Generic replacement for _auto_discover_schema() — works for any
+        MCP server, not just databases.
         """
         if not self.mcp_registry:
             return
 
-        # Extract SQL from planner output — try multiple patterns since small
-        # models put SQL in various formats (```sql, ```python, inline, etc.)
-        import re as _re
-        sql_blocks: list[str] = []
-
-        # 1) ```sql ... ``` blocks
-        sql_blocks += _re.findall(
-            r'```sql\s*\n(.*?)```', planner_output, _re.DOTALL | _re.IGNORECASE
-        )
-
-        # 2) sql="SELECT ..." or sql='SELECT ...' inside Python/other code blocks
-        sql_blocks += _re.findall(
-            r'sql\s*=\s*["\'](.+?)["\']', planner_output, _re.DOTALL | _re.IGNORECASE
-        )
-
-        # 3) Bare SELECT ... (with or without semicolon, multiline until next blank line or ```)
-        if not sql_blocks:
-            sql_blocks += _re.findall(
-                r'(SELECT\s+.+?)(?:;|\n\n|```|\Z)', planner_output,
-                _re.DOTALL | _re.IGNORECASE,
-            )
-
-        # 4) Inside backtick-quoted inline: `SELECT ...`
-        if not sql_blocks:
-            sql_blocks += _re.findall(
-                r'`(SELECT\s+[^`]+)`', planner_output, _re.IGNORECASE
-            )
-
-        # Clean up: strip SQL comments and keep only SELECT statements
-        cleaned = []
-        for s in sql_blocks:
-            # Remove SQL single-line comments (-- ...)
-            lines = [ln for ln in s.splitlines()
-                     if not ln.strip().startswith("--")]
-            s = "\n".join(lines).strip().rstrip(";").strip()
-            if _re.match(r'^SELECT\s', s, _re.IGNORECASE):
-                cleaned.append(s)
-        sql_blocks = cleaned
-
-        if not sql_blocks:
+        caps_map = self.mcp_registry.get_capabilities()
+        if not caps_map:
             return
 
-        # Detect connection profile (portable: reads from mcp.json env first)
-        conn_args = self._get_db_connection_args()
-
-        await self.send_status("Executing SQL queries...", "query")
-        exec_log = []
-
-        for sql in sql_blocks[:5]:  # Max 5 queries
-            sql = sql.strip()
-            if not sql:
+        for server_name, caps in caps_map.items():
+            if not caps.discovery_tools:
                 continue
-            try:
-                args = {"sql": sql, **conn_args}
-                result = await self.mcp_registry.call_tool_by_name("db_query", args)
-                exec_log.append({
-                    "tool": "db_query",
-                    "arguments": {"sql": sql[:100], **conn_args},
-                    "result": result.content[:3000] if result else "",
-                    "is_error": result.is_error if result else True,
+
+            # Check if user query matches this server's triggers
+            server_def = self.mcp_registry.config.servers.get(server_name)
+            triggers = server_def.triggers if server_def else []
+            if triggers and not any(t in self.original_plan.lower() for t in triggers):
+                continue
+
+            await self.send_status(
+                f"Discovering {server_name} resources...", "setup",
+            )
+            conn_args = self._get_server_connection_args(server_name)
+
+            # Phase 1: Call discovery tools to enumerate resources
+            context_parts: list[str] = []
+            resource_names: list[str] = []
+            for tool in caps.discovery_tools:
+                result = await self.mcp_registry.call_tool(
+                    server_name, tool.name, conn_args,
+                )
+                if not result or result.is_error:
+                    continue
+                context_parts.append(
+                    f"## {tool.name}\n{result.content}"
+                )
+                # Extract resource names from output (markdown tables, lists)
+                resource_names.extend(
+                    self._extract_resource_names(result.content)
+                )
+
+            # Phase 2: Rank resources by relevance and inspect top-N
+            if caps.inspection_tools and resource_names:
+                query_lower = (self.original_plan or "").lower()
+                query_words = set(query_lower.split())
+
+                def _relevance(name: str) -> int:
+                    score = 0
+                    nl = name.lower()
+                    if nl in query_lower:
+                        score += 100
+                    if nl.rstrip("s") in query_lower or (nl + "s") in query_lower:
+                        score += 50
+                    nw = set(nl.replace("_", " ").split())
+                    overlap = nw & query_words
+                    if overlap:
+                        score += len(overlap) * 10
+                    return score
+
+                scored = sorted(resource_names,
+                                key=lambda r: (-_relevance(r), r))
+                max_inspect = min(10, max(5, 20 - len(resource_names) // 5))
+
+                for rname in scored[:max_inspect]:
+                    for insp_tool in caps.inspection_tools:
+                        # Build args: use the first required param for the name
+                        args = self._build_inspection_args(
+                            insp_tool, rname, conn_args,
+                        )
+                        result = await self.mcp_registry.call_tool(
+                            server_name, insp_tool.name, args,
+                        )
+                        if result and not result.is_error:
+                            context_parts.append(
+                                f"## {rname}\n{result.content}"
+                            )
+
+            # Inject discovered context into memory
+            if context_parts:
+                ctx = (
+                    f"{server_name} resources (auto-discovered via MCP):\n\n"
+                    + "\n\n".join(context_parts)
+                )
+                if self.memory_context:
+                    self.memory_context = f"{ctx}\n\n{self.memory_context}"
+                else:
+                    self.memory_context = ctx
+                await self.ws.send_json({
+                    "type": "status",
+                    "phase": "setup",
+                    "message": (
+                        f"Discovered: {len(resource_names)} resources from "
+                        f"{server_name} ({', '.join(resource_names[:15])})"
+                    ),
                 })
-            except Exception as exc:
-                exec_log.append({
-                    "tool": "db_query",
-                    "arguments": {"sql": sql[:100]},
-                    "result": str(exc)[:500],
-                    "is_error": True,
-                })
+
+    @staticmethod
+    def _extract_resource_names(content: str) -> list[str]:
+        """Extract resource names from MCP tool output.
+
+        Handles common output formats:
+        - Markdown tables: | name | ... |
+        - Bullet lists: - name
+        - Numbered lists: 1. name
+        - Plain lines
+        """
+        names: list[str] = []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or "---" in line:
+                continue
+            # Markdown table row
+            if line.startswith("|"):
+                cells = [c.strip() for c in line.split("|") if c.strip()]
+                if cells and cells[0].replace("_", "").isalnum():
+                    name = cells[0]
+                    # Skip header rows
+                    if name.lower() not in (
+                        "table", "name", "table_name", "file", "resource",
+                        "directory", "endpoint", "repo", "repository",
+                    ):
+                        names.append(name)
+            # Bullet or numbered list
+            elif line.startswith(("- ", "* ")) or (
+                len(line) > 2 and line[0].isdigit() and line[1] in ".)"
+            ):
+                import re as _re
+                m = _re.match(r'^(?:[-*]|\d+[.)]\s)\s*(.+)', line)
+                if m:
+                    name = m.group(1).strip().split()[0]  # First word
+                    clean = name.replace("_", "").replace(".", "").replace(
+                        "/", "").replace("-", "")
+                    if clean and clean.isalnum():
+                        names.append(name)
+        # Remove duplicates, preserve order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                unique.append(n)
+        return unique
+
+    @staticmethod
+    def _build_inspection_args(
+        tool: object, resource_name: str, conn_args: dict,
+    ) -> dict:
+        """Build arguments for an inspection tool call.
+
+        Uses the tool's input_schema to find the right parameter name
+        for the resource identifier (e.g., 'table', 'path', 'repo').
+        """
+        args = dict(conn_args)
+        schema = getattr(tool, "input_schema", {})
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        # Find the parameter that should receive the resource name
+        # Prefer required params, then any non-connection param
+        target_param = None
+        for param_name in required:
+            if param_name not in ("connection", "profile", "config"):
+                target_param = param_name
+                break
+        if not target_param:
+            for param_name in props:
+                if param_name not in ("connection", "profile", "config"):
+                    target_param = param_name
+                    break
+        if target_param:
+            args[target_param] = resource_name
+        return args
+
+    async def _auto_execute_from_output(self, agent_output: str):
+        """Extract actionable content from agent output and auto-execute.
+
+        Uses the capabilities system to determine what patterns to look for
+        (SQL, file paths, URLs, etc.) and which tool to execute them with.
+        Generic replacement for _auto_execute_db_queries().
+        """
+        if not self.mcp_registry:
+            return
+
+        from agent_team.mcp.capabilities import extract_content
+
+        caps_map = self.mcp_registry.get_capabilities()
+        exec_log: list[dict] = []
+
+        for server_name, caps in caps_map.items():
+            if not caps.action_tools or not caps.extract_patterns:
+                continue
+
+            conn_args = self._get_server_connection_args(server_name)
+
+            for pattern_key in caps.extract_patterns:
+                extracted = extract_content(agent_output, pattern_key)
+                if not extracted:
+                    continue
+
+                # Find the action tool whose schema matches this pattern
+                target_tool = None
+                for tool in caps.action_tools:
+                    props = tool.input_schema.get("properties", {})
+                    for pname in props:
+                        if pname.lower() in (pattern_key, "query", "sql",
+                                             "path", "file", "url", "command"):
+                            target_tool = (tool, pname)
+                            break
+                    if target_tool:
+                        break
+
+                if not target_tool:
+                    continue
+
+                tool, param_name = target_tool
+                await self.send_status(
+                    f"Executing {pattern_key} via {tool.name}...", "query",
+                )
+
+                for content in extracted[:5]:  # Max 5 per pattern
+                    content = content.strip()
+                    if not content:
+                        continue
+                    try:
+                        args = {param_name: content, **conn_args}
+                        result = await self.mcp_registry.call_tool(
+                            server_name, tool.name, args,
+                        )
+                        exec_log.append({
+                            "tool": tool.name,
+                            "arguments": {param_name: content[:100],
+                                          **conn_args},
+                            "result": result.content[:3000] if result else "",
+                            "is_error": result.is_error if result else True,
+                        })
+                    except Exception as exc:
+                        exec_log.append({
+                            "tool": tool.name,
+                            "arguments": {param_name: content[:100]},
+                            "result": str(exc)[:500],
+                            "is_error": True,
+                        })
 
         if exec_log:
             await self.ws.send_json({
@@ -891,7 +990,7 @@ class AgentTeam:
 
         # Auto-execute SQL if MCP db tools are available
         if self.mcp_registry:
-            await self._auto_execute_db_queries(output)
+            await self._auto_execute_from_output(output)
 
     async def _write_executor_files(self, executor_output: str):
         """Write files from executor output to disk (shared by legacy and named pipeline)."""
@@ -1003,18 +1102,14 @@ class AgentTeam:
                 except Exception:
                     pass
 
-            # Pre-session: auto-discover database schema via MCP if the request
-            # involves database/SQL queries.  This gives all agents the schema
-            # so small models don't need to ask the user for table names.
+            # Pre-session: auto-discover resources from connected MCP servers.
+            # Uses the capabilities system to call discovery/inspection tools
+            # and inject results into agent context (works for any MCP server).
             if self.mcp_registry and self.mcp_tools_prompt:
-                db_keywords = {"database", "sql", "query", "table", "select",
-                               "join", "schema", "column", "prescription",
-                               "patient", "user_id", "patient_id"}
-                if any(kw in user_plan.lower() for kw in db_keywords):
-                    try:
-                        await self._auto_discover_schema()
-                    except Exception:
-                        pass
+                try:
+                    await self._auto_discover_context()
+                except Exception:
+                    pass
 
             # Classify task complexity for adaptive routing
             self.complexity = classify_complexity(user_plan, self.mode.value)
@@ -1131,7 +1226,7 @@ class AgentTeam:
                             )
                             # Auto-execute SQL if MCP db tools are available
                             if self.mcp_registry:
-                                await self._auto_execute_db_queries(plan_out)
+                                await self._auto_execute_from_output(plan_out)
                     elif stage_name == "executor":
                         # Trigger file writing from executor output
                         exec_out = self.phase_outputs.get(f"STAGE_EXECUTOR", "")

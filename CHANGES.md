@@ -2,6 +2,53 @@
 
 ---
 
+## v7.2.0 — Generic MCP Capabilities System (2026-04-06)
+
+### Summary
+
+Replaced the three database-specific functions (`_auto_discover_schema`, `_auto_execute_db_queries`, `_get_db_connection_args`) with a generic capability system that works for ANY MCP server. Adding a new MCP server (filesystem, API, etc.) now gets auto-discovery and auto-execution without code changes.
+
+### Architecture
+
+Tools are auto-categorized into three roles by name/description patterns:
+- **Discovery** (list, search, find, enumerate) — enumerate available resources
+- **Inspection** (describe, read, get, view) — detail a single resource
+- **Action** (query, write, execute) — perform operations
+
+Optional `capabilities` override in `mcp.json` for explicit control.
+
+### New: `mcp/capabilities.py`
+- `MCPCapabilities` dataclass — categorized tools + extract patterns per server
+- `categorize_tools()` — hybrid auto-detect + config override
+- `EXTRACT_PATTERNS` — regex registry for SQL, paths, URLs, commands
+- `infer_extract_patterns()` — guess patterns from tool input schema
+- `extract_content()` — extract actionable content from agent output
+
+### Changed: `agents/runner.py`
+- `_auto_discover_context()` replaces `_auto_discover_schema()` — discovers resources from ALL MCP servers using trigger matching + discovery/inspection tools
+- `_auto_execute_from_output()` replaces `_auto_execute_db_queries()` — extracts content using pattern registry and executes via matched action tools
+- `_get_server_connection_args()` replaces `_get_db_connection_args()` — reads connection config from any server's env
+- Generic resource name extraction from markdown tables, bullet lists, numbered lists
+- Generic inspection args building from tool input schema
+
+### Changed: `mcp/config.py`
+- Added optional `capabilities` field to `MCPServerDef`
+
+### Changed: `mcp/registry.py`
+- Added `get_capabilities()` method
+
+### Backward Compatibility
+- Database MCP works identically — auto-detection correctly categorizes `db_list_tables` → discovery, `db_describe_table` → inspection, `db_query` → action
+- No `mcp.json` changes required — `capabilities` field is optional
+- SQL extraction patterns preserved from old implementation
+
+### Tested
+- 26 unit tests: tool categorization, pattern inference, SQL/path extraction, config
+- Integration tests: resource extraction, inspection args, connection config
+- E2E with Ollama: full orchestrator→thinker→planner pipeline with SQL extraction
+
+---
+
 ## v7.1.3 — Fix SQL Auto-Execution Dropping Queries with Comments (2026-04-06)
 
 ### Summary
