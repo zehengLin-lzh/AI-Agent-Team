@@ -2,6 +2,27 @@
 
 ---
 
+## v7.1.3 — Fix SQL Auto-Execution Dropping Queries with Comments (2026-04-06)
+
+### Summary
+
+Fixed `_auto_execute_db_queries()` silently dropping SQL queries that contain comments. When the planner (especially qwen3:14b) generated SQL blocks with comment headers like `-- Final query to fetch active users`, the cleaning step rejected them because the block didn't start with `SELECT`.
+
+### Fix
+
+Strip SQL single-line comments (`-- ...`) before checking if the block is a SELECT statement. This allows SQL like:
+```sql
+-- Final query
+SELECT user_id, email FROM users WHERE status = 'active' LIMIT 5;
+```
+to be properly extracted and auto-executed.
+
+### Files Modified
+
+- `agents/runner.py` — Comment stripping in `_auto_execute_db_queries()` cleaning step
+
+---
+
 ## v7.1.2 — Model Availability Validation + Fallback (2026-04-06)
 
 ### Summary

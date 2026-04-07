@@ -238,10 +238,13 @@ class AgentTeam:
                 r'`(SELECT\s+[^`]+)`', planner_output, _re.IGNORECASE
             )
 
-        # Clean up: only keep actual SELECT statements
+        # Clean up: strip SQL comments and keep only SELECT statements
         cleaned = []
         for s in sql_blocks:
-            s = s.strip().rstrip(";").strip()
+            # Remove SQL single-line comments (-- ...)
+            lines = [ln for ln in s.splitlines()
+                     if not ln.strip().startswith("--")]
+            s = "\n".join(lines).strip().rstrip(";").strip()
             if _re.match(r'^SELECT\s', s, _re.IGNORECASE):
                 cleaned.append(s)
         sql_blocks = cleaned
