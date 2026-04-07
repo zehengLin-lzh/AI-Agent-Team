@@ -2,6 +2,26 @@
 
 ---
 
+## v7.2.2 — Genericize FK Discovery — Zero Hardcoded DB Logic (2026-04-07)
+
+### Summary
+
+Removed all hardcoded SQLite/MySQL queries from runner.py. FK relationship discovery is now fully driven by the capabilities system:
+- **Auto-detection**: If any action tool accepts a `sql`/`query` parameter, it's detected as a database → standard FK queries for SQLite/MySQL/PostgreSQL are tried automatically
+- **Config override**: `mcp.json` can specify custom `relationship_queries` in capabilities
+- **Heuristic fallback**: Column-name pattern matching (`*_id` → table name) works for any resource type
+
+Runner code has **zero database-specific logic**. All SQL queries live in `capabilities.py` as data, not in runner.py as code.
+
+### Files Modified
+
+- `mcp/capabilities.py` — Added `_STANDARD_FK_QUERIES`, `detect_relationship_queries()`, `find_query_param()`, `relationship_queries` field in `MCPCapabilities`
+- `agents/runner.py` — Rewrote `_discover_relationships()` to read from capabilities instead of hardcoding queries
+
+### Tested: 17 unit tests, all passing
+
+---
+
 ## v7.2.1 — Auto-Discover Foreign Key Relationships (2026-04-06)
 
 ### Summary

@@ -68,6 +68,61 @@ _PARAM_TO_PATTERN: dict[str, str] = {
 }
 
 
+# ── Standard FK queries for known database engines ───────────────────────────
+# Tried in order; first successful result wins.
+
+_STANDARD_FK_QUERIES: list[str] = [
+    # SQLite
+    (
+        "SELECT m.name AS tbl, p.[from] AS col, "
+        "p.[table] AS ref_tbl, p.[to] AS ref_col "
+        "FROM sqlite_master m, pragma_foreign_key_list(m.name) p "
+        "WHERE m.type = 'table'"
+    ),
+    # MySQL
+    (
+        "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS col, "
+        "REFERENCED_TABLE_NAME AS ref_tbl, REFERENCED_COLUMN_NAME AS ref_col "
+        "FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE "
+        "WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL"
+    ),
+    # PostgreSQL
+    (
+        "SELECT tc.table_name AS tbl, kcu.column_name AS col, "
+        "ccu.table_name AS ref_tbl, ccu.column_name AS ref_col "
+        "FROM information_schema.table_constraints tc "
+        "JOIN information_schema.key_column_usage kcu "
+        "ON tc.constraint_name = kcu.constraint_name "
+        "AND tc.table_schema = kcu.table_schema "
+        "JOIN information_schema.constraint_column_usage ccu "
+        "ON tc.constraint_name = ccu.constraint_name "
+        "WHERE tc.constraint_type = 'FOREIGN KEY'"
+    ),
+]
+
+
+def detect_relationship_queries(tools: list["MCPTool"]) -> list[str]:
+    """Auto-detect if any tool accepts a SQL/query param.
+
+    If yes, return standard FK queries for SQLite/MySQL/PostgreSQL.
+    If no, return empty list (column-name heuristic will be used instead).
+    """
+    for tool in tools:
+        props = tool.input_schema.get("properties", {})
+        if any(p.lower() in ("sql", "query") for p in props):
+            return list(_STANDARD_FK_QUERIES)
+    return []
+
+
+def find_query_param(tool: "MCPTool") -> str | None:
+    """Find the parameter name that accepts a SQL/query string."""
+    props = tool.input_schema.get("properties", {})
+    for p in props:
+        if p.lower() in ("sql", "query"):
+            return p
+    return None
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -78,6 +133,7 @@ class MCPCapabilities:
     inspection_tools: list["MCPTool"] = field(default_factory=list)
     action_tools: list["MCPTool"] = field(default_factory=list)
     extract_patterns: list[str] = field(default_factory=list)
+    relationship_queries: list[str] = field(default_factory=list)
 
 
 def categorize_tools(
@@ -179,7 +235,13 @@ def _from_explicit(
             patterns.extend(infer_extract_patterns(t))
         patterns = list(dict.fromkeys(patterns))  # dedupe, preserve order
 
-    return MCPCapabilities(server_name, discovery, inspection, action, patterns)
+    # Relationship queries: explicit or auto-detected
+    rel_queries = config.get("relationship_queries", [])
+    if not rel_queries:
+        rel_queries = detect_relationship_queries(action)
+
+    return MCPCapabilities(server_name, discovery, inspection, action,
+                           patterns, rel_queries)
 
 
 def _from_auto(
@@ -203,4 +265,6 @@ def _from_auto(
         patterns.extend(infer_extract_patterns(t))
     patterns = list(dict.fromkeys(patterns))
 
-    return MCPCapabilities(server_name, discovery, inspection, action, patterns)
+    rel_queries = detect_relationship_queries(action)
+    return MCPCapabilities(server_name, discovery, inspection, action,
+                           patterns, rel_queries)

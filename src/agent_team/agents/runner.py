@@ -235,9 +235,9 @@ class AgentTeam:
                             described_resources[rname] = result.content
 
             # Phase 3: Discover relationships (FK / references)
-            if caps.action_tools and resource_names:
+            if resource_names:
                 rel_ctx = await self._discover_relationships(
-                    server_name, resource_names, described_resources,
+                    server_name, caps, resource_names, described_resources,
                     conn_args,
                 )
                 if rel_ctx:
@@ -344,60 +344,41 @@ class AgentTeam:
     async def _discover_relationships(
         self,
         server_name: str,
+        caps: object,
         resource_names: list[str],
         described_resources: dict[str, str],
         conn_args: dict,
     ) -> str:
-        """Discover FK relationships between database tables.
+        """Discover resource relationships generically.
 
-        Tries engine-specific queries (SQLite PRAGMA, MySQL INFORMATION_SCHEMA),
-        then falls back to column-name heuristic inference.
+        Uses the capabilities system — ZERO hardcoded DB logic:
+        1. Try relationship_queries from capabilities (auto-detected or config)
+        2. Fall back to column-name heuristic (works for any resource type)
         Returns formatted relationship context or empty string.
         """
-        relationships: list[tuple[str, str, str, str]] = []  # (tbl, col, ref_tbl, ref_col)
+        from agent_team.mcp.capabilities import find_query_param
 
-        # Try 1: SQLite — PRAGMA foreign_key_list via sqlite_master
-        if not relationships:
-            try:
-                result = await self.mcp_registry.call_tool(
-                    server_name, "db_query",
-                    {
-                        "sql": (
-                            "SELECT m.name AS tbl, p.[from] AS col, "
-                            "p.[table] AS ref_tbl, p.[to] AS ref_col "
-                            "FROM sqlite_master m, pragma_foreign_key_list(m.name) p "
-                            "WHERE m.type = 'table'"
-                        ),
-                        **conn_args,
-                    },
-                )
-                if result and not result.is_error and result.content.strip():
-                    relationships = self._parse_fk_result(result.content)
-            except Exception:
-                pass
+        relationships: list[tuple[str, str, str, str]] = []
 
-        # Try 2: MySQL — INFORMATION_SCHEMA
-        if not relationships:
-            try:
-                result = await self.mcp_registry.call_tool(
-                    server_name, "db_query",
-                    {
-                        "sql": (
-                            "SELECT TABLE_NAME, COLUMN_NAME, "
-                            "REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
-                            "FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE "
-                            "WHERE TABLE_SCHEMA = DATABASE() "
-                            "AND REFERENCED_TABLE_NAME IS NOT NULL"
-                        ),
-                        **conn_args,
-                    },
-                )
-                if result and not result.is_error and result.content.strip():
-                    relationships = self._parse_fk_result(result.content)
-            except Exception:
-                pass
+        # Try relationship queries from capabilities
+        if caps.relationship_queries and caps.action_tools:
+            action_tool = caps.action_tools[0]
+            query_param = find_query_param(action_tool)
+            if query_param:
+                for query in caps.relationship_queries:
+                    try:
+                        result = await self.mcp_registry.call_tool(
+                            server_name, action_tool.name,
+                            {query_param: query, **conn_args},
+                        )
+                        if result and not result.is_error and result.content.strip():
+                            relationships = self._parse_fk_result(result.content)
+                            if relationships:
+                                break
+                    except Exception:
+                        continue
 
-        # Try 3: Column-name heuristic
+        # Fallback: generic column-name heuristic
         if not relationships:
             relationships = self._infer_relationships_from_columns(
                 resource_names, described_resources,
@@ -406,13 +387,12 @@ class AgentTeam:
         if not relationships:
             return ""
 
-        # Build formatted context
         lines = ["## Relationships (auto-discovered)"]
         for tbl, col, ref_tbl, ref_col in relationships:
             lines.append(f"- {tbl}.{col} → {ref_tbl}.{ref_col}")
 
         await self.send_status(
-            f"Discovered {len(relationships)} table relationships", "setup",
+            f"Discovered {len(relationships)} relationships", "setup",
         )
         return "\n".join(lines)
 
