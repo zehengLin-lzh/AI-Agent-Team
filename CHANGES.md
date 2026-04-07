@@ -2,6 +2,56 @@
 
 ---
 
+## v7.3.0 — MCP Provider Pattern — Type-Specific Knowledge as Plugins (2026-04-07)
+
+### Summary
+
+Restructured the MCP module with a provider pattern. Type-specific knowledge (FK queries, SQL extraction, path patterns) is now encapsulated in provider plugins under `mcp/providers/`, while `capabilities.py` is purely generic.
+
+### New Structure
+
+```
+mcp/providers/
+├── __init__.py      — Provider registry, detect_provider()
+├── base.py          — MCPProvider abstract interface
+├── database.py      — DatabaseProvider: FK queries, SQL patterns, comment stripping
+├── filesystem.py    — FilesystemProvider: path extraction (stub)
+└── api.py           — APIProvider: URL extraction (stub)
+```
+
+### How It Works
+
+1. `detect_provider(tools)` scans tool input schemas for known param names
+   - `sql`/`query` → DatabaseProvider
+   - `path`/`file` → FilesystemProvider
+   - `url`/`endpoint` → APIProvider
+2. Provider supplies: relationship queries, extraction patterns, content cleaning
+3. `capabilities.py` delegates to the matched provider — zero type-specific code
+4. `mcp.json` config can override anything the provider supplies
+
+### Adding a New MCP Type
+
+Create `mcp/providers/newtype.py`:
+```python
+class NewTypeProvider(MCPProvider):
+    name = "newtype"
+    detect_params = ["param_name"]
+    def get_relationship_queries(self): ...
+    def get_extract_patterns(self): ...
+    def clean_extracted(self, content, key): ...
+```
+Register in `providers/__init__.py`. Done.
+
+### Files Modified
+
+- `mcp/capabilities.py` — Removed all DB-specific code, delegates to providers
+- `mcp/providers/` — **NEW** directory with 5 files
+- `agents/runner.py` — Updated imports to use provider API
+
+### Tested: 28 unit tests, all passing
+
+---
+
 ## v7.2.2 — Genericize FK Discovery — Zero Hardcoded DB Logic (2026-04-07)
 
 ### Summary

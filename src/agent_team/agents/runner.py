@@ -356,14 +356,12 @@ class AgentTeam:
         2. Fall back to column-name heuristic (works for any resource type)
         Returns formatted relationship context or empty string.
         """
-        from agent_team.mcp.capabilities import find_query_param
-
         relationships: list[tuple[str, str, str, str]] = []
 
-        # Try relationship queries from capabilities
-        if caps.relationship_queries and caps.action_tools:
+        # Try relationship queries from capabilities (provider-supplied)
+        if caps.relationship_queries and caps.action_tools and caps.provider:
             action_tool = caps.action_tools[0]
-            query_param = find_query_param(action_tool)
+            query_param = caps.provider.find_query_param(action_tool)
             if query_param:
                 for query in caps.relationship_queries:
                     try:
@@ -471,7 +469,7 @@ class AgentTeam:
             conn_args = self._get_server_connection_args(server_name)
 
             for pattern_key in caps.extract_patterns:
-                extracted = extract_content(agent_output, pattern_key)
+                extracted = extract_content(agent_output, pattern_key, caps.provider)
                 if not extracted:
                     continue
 
