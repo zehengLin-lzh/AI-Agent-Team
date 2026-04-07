@@ -2,6 +2,38 @@
 
 ---
 
+## v7.2.1 — Auto-Discover Foreign Key Relationships (2026-04-06)
+
+### Summary
+
+Agents now automatically discover foreign key relationships between database tables and inject them into the schema context. This enables small models (7B) to construct proper JOIN queries for complex multi-table operations without user guidance.
+
+### How It Works
+
+After discovering and describing tables (Phase 1-2), a new Phase 3 runs:
+1. **SQLite**: Queries `pragma_foreign_key_list()` via `sqlite_master` to get all FK constraints
+2. **MySQL**: Queries `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` for FK references
+3. **Fallback**: Column name heuristic — matches `*_id` columns against existing table names (singular/plural)
+
+The discovered relationships are injected as a `## Relationships` section:
+```
+## Relationships (auto-discovered)
+- patients.user_id → users.user_id
+- prescriptions.patient_id → patients.patient_id
+- users.address_id → addresses.address_id
+```
+
+### Files Modified
+
+- `agents/runner.py` — Added `_discover_relationships()`, `_parse_fk_result()`, `_infer_relationships_from_columns()`, `_parse_column_names_from_description()`. Updated `_auto_discover_context()` with Phase 3.
+
+### Tested
+
+- 15 unit tests: FK parsing (SQLite + MySQL format), column heuristic, self-reference prevention, column parser
+- E2E: 7b model generates correct 3-table JOIN with relationship context
+
+---
+
 ## v7.2.0 — Generic MCP Capabilities System (2026-04-06)
 
 ### Summary

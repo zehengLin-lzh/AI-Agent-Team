@@ -26,6 +26,27 @@ from agent_team.files.scaffolder import scaffold_plan_paths
 from agent_team.plans.storage import save_plan_markdown
 
 
+def _parse_column_names_from_description(description: str) -> list[str]:
+    """Extract column names from a db_describe_table markdown table output.
+
+    Expected format:
+    | Column | Type | Nullable | Key | Default |
+    |--------|------|----------|-----|---------|
+    | user_id | INTEGER | NOT NULL | PK | |
+    """
+    columns: list[str] = []
+    for line in description.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or "---" in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if cells and cells[0].lower() not in (
+            "column", "name", "field", "col",
+        ):
+            columns.append(cells[0])
+    return columns
+
+
 class _LockedWebSocket:
     """Wrapper that serializes send_json calls for parallel-safe WebSocket writes."""
 
@@ -177,6 +198,7 @@ class AgentTeam:
                 )
 
             # Phase 2: Rank resources by relevance and inspect top-N
+            described_resources: dict[str, str] = {}
             if caps.inspection_tools and resource_names:
                 query_lower = (self.original_plan or "").lower()
                 query_words = set(query_lower.split())
@@ -200,7 +222,6 @@ class AgentTeam:
 
                 for rname in scored[:max_inspect]:
                     for insp_tool in caps.inspection_tools:
-                        # Build args: use the first required param for the name
                         args = self._build_inspection_args(
                             insp_tool, rname, conn_args,
                         )
@@ -211,6 +232,16 @@ class AgentTeam:
                             context_parts.append(
                                 f"## {rname}\n{result.content}"
                             )
+                            described_resources[rname] = result.content
+
+            # Phase 3: Discover relationships (FK / references)
+            if caps.action_tools and resource_names:
+                rel_ctx = await self._discover_relationships(
+                    server_name, resource_names, described_resources,
+                    conn_args,
+                )
+                if rel_ctx:
+                    context_parts.append(rel_ctx)
 
             # Inject discovered context into memory
             if context_parts:
@@ -307,6 +338,136 @@ class AgentTeam:
         if target_param:
             args[target_param] = resource_name
         return args
+
+    # ── Relationship discovery ─────────────────────────────────────────────
+
+    async def _discover_relationships(
+        self,
+        server_name: str,
+        resource_names: list[str],
+        described_resources: dict[str, str],
+        conn_args: dict,
+    ) -> str:
+        """Discover FK relationships between database tables.
+
+        Tries engine-specific queries (SQLite PRAGMA, MySQL INFORMATION_SCHEMA),
+        then falls back to column-name heuristic inference.
+        Returns formatted relationship context or empty string.
+        """
+        relationships: list[tuple[str, str, str, str]] = []  # (tbl, col, ref_tbl, ref_col)
+
+        # Try 1: SQLite — PRAGMA foreign_key_list via sqlite_master
+        if not relationships:
+            try:
+                result = await self.mcp_registry.call_tool(
+                    server_name, "db_query",
+                    {
+                        "sql": (
+                            "SELECT m.name AS tbl, p.[from] AS col, "
+                            "p.[table] AS ref_tbl, p.[to] AS ref_col "
+                            "FROM sqlite_master m, pragma_foreign_key_list(m.name) p "
+                            "WHERE m.type = 'table'"
+                        ),
+                        **conn_args,
+                    },
+                )
+                if result and not result.is_error and result.content.strip():
+                    relationships = self._parse_fk_result(result.content)
+            except Exception:
+                pass
+
+        # Try 2: MySQL — INFORMATION_SCHEMA
+        if not relationships:
+            try:
+                result = await self.mcp_registry.call_tool(
+                    server_name, "db_query",
+                    {
+                        "sql": (
+                            "SELECT TABLE_NAME, COLUMN_NAME, "
+                            "REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
+                            "FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE "
+                            "WHERE TABLE_SCHEMA = DATABASE() "
+                            "AND REFERENCED_TABLE_NAME IS NOT NULL"
+                        ),
+                        **conn_args,
+                    },
+                )
+                if result and not result.is_error and result.content.strip():
+                    relationships = self._parse_fk_result(result.content)
+            except Exception:
+                pass
+
+        # Try 3: Column-name heuristic
+        if not relationships:
+            relationships = self._infer_relationships_from_columns(
+                resource_names, described_resources,
+            )
+
+        if not relationships:
+            return ""
+
+        # Build formatted context
+        lines = ["## Relationships (auto-discovered)"]
+        for tbl, col, ref_tbl, ref_col in relationships:
+            lines.append(f"- {tbl}.{col} → {ref_tbl}.{ref_col}")
+
+        await self.send_status(
+            f"Discovered {len(relationships)} table relationships", "setup",
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_fk_result(content: str) -> list[tuple[str, str, str, str]]:
+        """Parse FK query results from markdown table or pipe-separated output.
+
+        Expects 4 columns: table, column, ref_table, ref_column.
+        Handles both markdown table format and plain pipe-separated.
+        """
+        results: list[tuple[str, str, str, str]] = []
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or "---" in line:
+                continue
+            cells = [c.strip() for c in line.split("|") if c.strip()]
+            if len(cells) >= 4:
+                # Skip header rows
+                if cells[0].lower() in ("tbl", "table", "table_name"):
+                    continue
+                results.append((cells[0], cells[1], cells[2], cells[3]))
+        return results
+
+    @staticmethod
+    def _infer_relationships_from_columns(
+        resource_names: list[str],
+        described_resources: dict[str, str],
+    ) -> list[tuple[str, str, str, str]]:
+        """Infer FK relationships from column naming patterns.
+
+        For each column ending in '_id', checks if a matching table exists
+        (singular or plural form).  Works even when FKs aren't declared.
+        """
+        table_set = {t.lower() for t in resource_names}
+        relationships: list[tuple[str, str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for table_name, description in described_resources.items():
+            columns = _parse_column_names_from_description(description)
+            for col in columns:
+                col_lower = col.lower()
+                if not col_lower.endswith("_id"):
+                    continue
+                base = col_lower[:-3]  # "user_id" → "user"
+                # Try singular, plural-s, plural-es forms
+                for candidate in [base, base + "s", base + "es"]:
+                    if candidate in table_set and candidate != table_name.lower():
+                        key = (table_name.lower(), col_lower)
+                        if key not in seen:
+                            seen.add(key)
+                            relationships.append(
+                                (table_name, col, candidate, col_lower)
+                            )
+                        break
+        return relationships
 
     async def _auto_execute_from_output(self, agent_output: str):
         """Extract actionable content from agent output and auto-execute.
