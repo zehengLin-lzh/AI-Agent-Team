@@ -223,16 +223,24 @@ async def get_providers():
 
 @app.post("/providers/switch")
 async def switch_provider(body: dict):
-    """Switch the active LLM provider."""
+    """Switch the active LLM provider. Auto-sets a valid default model."""
     provider_name = body.get("provider", "").strip()
     if not provider_name:
         return {"error": "provider name required"}
     try:
         set_provider(provider_name)
+        # Auto-set a valid default model for the new provider
+        from agent_team.config import PROVIDER_MODELS
+        provider = get_provider()
+        models = PROVIDER_MODELS.get(provider_name, {})
+        if models:
+            provider.set_active_model(models["fast"])
+        elif hasattr(provider, 'default_model'):
+            provider.set_active_model(provider.default_model)
         return {
             "status": "ok",
             "provider": provider_name,
-            "model": get_active_model(),
+            "model": provider.get_active_model(),
         }
     except ValueError as e:
         return {"error": str(e)}

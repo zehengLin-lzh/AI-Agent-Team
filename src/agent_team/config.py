@@ -8,11 +8,15 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "nomic-embed-text"
 
 # ── Provider-aware model defaults ──────────────────────────────────────────
-# Detect active provider to set appropriate model names.
-# Ollama uses local model tags; OpenRouter uses org/model:variant format.
+# Each provider has different model name formats. Store both and select at runtime.
+
+PROVIDER_MODELS = {
+    "ollama": {"fast": "qwen2.5-coder:7b", "reasoning": "qwen3:14b"},
+    "openrouter": {"fast": "qwen/qwen3-coder:free", "reasoning": "google/gemma-4-31b-it:free"},
+}
 
 def _detect_provider() -> str:
-    """Quick provider detection for config-time model selection."""
+    """Quick provider detection for config-time defaults."""
     if os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter"
     try:
@@ -27,13 +31,9 @@ def _detect_provider() -> str:
     return "ollama"
 
 _PROVIDER = _detect_provider()
-
-if _PROVIDER == "openrouter":
-    MODEL = "qwen/qwen3-coder:free"
-    THINKING_MODEL = "google/gemma-4-31b-it:free"
-else:
-    MODEL = "qwen2.5-coder:7b"
-    THINKING_MODEL = "qwen3:14b"
+_models = PROVIDER_MODELS.get(_PROVIDER, PROVIDER_MODELS["ollama"])
+MODEL = _models["fast"]
+THINKING_MODEL = _models["reasoning"]
 
 # ── Three-tier model routing ────────────────────────────────────────────────
 FAST_MODEL = MODEL                  # Chat/ask/orchestrator — lightweight conversation

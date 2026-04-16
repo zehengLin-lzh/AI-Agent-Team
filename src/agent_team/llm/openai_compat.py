@@ -155,20 +155,36 @@ class OpenAICompatProvider(LLMProvider):
             url = self._get_chat_url()
             headers = self._get_headers()
 
-            # Retry loop for rate limits (429) and transient errors (503)
+            # Retry with model rotation for rate limits (429) and transient errors (503).
+            # Free-tier models have tight rate limits (~20 req/min). When hit,
+            # rotate to a different free model rather than waiting on the same one.
             import asyncio as _asyncio
-            _max_retries = 3
+            _max_retries = 4
+            _free_fallbacks = [m for m in getattr(self, 'models', [])
+                               if m.endswith(":free") and m != payload["model"]]
+            _fallback_idx = 0
             for _attempt in range(_max_retries + 1):
                 _resp = client.stream("POST", url, json=payload, headers=headers)
                 response = await _resp.__aenter__()
                 if response.status_code in (429, 503) and _attempt < _max_retries:
                     await response.aclose()
-                    wait = 2 ** _attempt + 1  # 2s, 3s, 5s
-                    await emitter.emit("status", {
-                        "message": f"Rate limited, retrying in {wait}s... ({_attempt+1}/{_max_retries})",
-                        "phase": "retry",
-                    })
-                    await _asyncio.sleep(wait)
+                    # Try a different free model if available
+                    if _free_fallbacks and _fallback_idx < len(_free_fallbacks):
+                        alt_model = _free_fallbacks[_fallback_idx]
+                        _fallback_idx += 1
+                        payload["model"] = alt_model
+                        await emitter.emit("status", {
+                            "message": f"Rate limited → switching to {alt_model}",
+                            "phase": "retry",
+                        })
+                        await _asyncio.sleep(1)
+                    else:
+                        wait = 5 * (_attempt + 1)  # 5s, 10s, 15s, 20s
+                        await emitter.emit("status", {
+                            "message": f"Rate limited, waiting {wait}s... ({_attempt+1}/{_max_retries})",
+                            "phase": "retry",
+                        })
+                        await _asyncio.sleep(wait)
                     continue
                 break
 

@@ -11,11 +11,13 @@ if TYPE_CHECKING:
 # Lazy-initialized providers
 _providers: dict[str, LLMProvider] = {}
 def _detect_default_provider() -> str:
-    """Auto-detect best provider: prefer OpenRouter if key is set, else Ollama."""
+    """Auto-detect best provider: prefer OpenRouter if key is set, else Ollama.
+
+    Checks env vars and .env file. Does NOT make network calls at import time.
+    """
     import os
     if os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter"
-    # Also check .env file (keys may not be in env yet at import time)
     try:
         from agent_team.llm.keys import has_key
         if has_key("openrouter"):
@@ -25,6 +27,25 @@ def _detect_default_provider() -> str:
     return "ollama"
 
 _active_provider: str = _detect_default_provider()
+
+
+async def auto_fallback_provider() -> None:
+    """Check if the active provider works; fall back to Ollama if it's rate-limited.
+
+    Call this once at session start (not at import time) to avoid slow imports.
+    """
+    global _active_provider
+    if _active_provider == "ollama":
+        return  # Already local, nothing to fall back to
+    try:
+        provider = get_provider()
+        health = await provider.health_check()
+        status = health.get("status", "")
+        error = health.get("error", "")
+        if status != "ok" and ("429" in str(error) or "rate limit" in str(error).lower()):
+            _active_provider = "ollama"
+    except Exception:
+        _active_provider = "ollama"
 
 
 def _ensure_providers():

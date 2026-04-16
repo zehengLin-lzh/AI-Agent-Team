@@ -258,12 +258,28 @@ def ws_url() -> str:
 
 
 async def check_backend() -> bool:
-    """Check backend health and populate state."""
+    """Check backend health and populate state.
+
+    If the active provider is rate-limited (429), auto-switch to Ollama
+    so the user isn't stuck with a broken session.
+    """
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(f"{BACKEND_URL}/health")
             data = r.json()
-            state.backend_connected = data.get("status") == "ok"
+            status = data.get("status", "")
+            error_str = data.get("error", "")
+
+            # If provider is rate-limited, switch to Ollama
+            if status != "ok" and ("429" in str(error_str) or "rate limit" in str(error_str).lower()):
+                console.print("[yellow]Provider rate-limited → auto-switching to Ollama[/]")
+                await client.post(f"{BACKEND_URL}/providers/switch", json={"provider": "ollama"})
+                # providers/switch now auto-sets the correct default model
+                r = await client.get(f"{BACKEND_URL}/health")
+                data = r.json()
+                status = data.get("status", "")
+
+            state.backend_connected = status == "ok"
             if state.backend_connected:
                 state.llm_provider = data.get("active_provider", state.llm_provider)
                 state.model = data.get("model", state.model)
@@ -856,6 +872,43 @@ async def stream_conversation(
                     total = token_summary.get("total", 0) if token_summary else 0
                     total_str = f", {total} tokens" if total else ""
                     console.print()
+
+                    # ── Final Answer Panel ──────────────────────────────────
+                    # Show the last meaningful agent output so the user doesn't
+                    # have to scroll up through agent streams to find the answer.
+                    # Priority: reviewer > planner > executor > thinker > any last output
+                    _stage_priority = ["reviewer", "planner", "executor", "thinker", "orchestrator"]
+                    final_answer = ""
+                    # Try stage-level keys first (from task graph path)
+                    for _stage in _stage_priority:
+                        for _k, _v in collected_outputs.items():
+                            if _stage in _k.lower() and _v.strip():
+                                final_answer = _v.strip()
+                                break
+                        if final_answer:
+                            break
+                    # Fallback: last collected output regardless of name
+                    if not final_answer and collected_outputs:
+                        final_answer = list(collected_outputs.values())[-1].strip()
+                    if final_answer:
+                        import re as _re
+                        # Strip internal protocol markers from display
+                        display = _re.sub(r"---+\s*HANDOFF\s*---+.*?---+\s*END_HANDOFF\s*---+", "", final_answer, flags=_re.DOTALL).strip()
+                        display = _re.sub(r"---+\s*TOOL_CALL:.*?---+\s*END\s*TOOL_CALL\s*---+", "", display, flags=_re.DOTALL).strip()
+                        display = _re.sub(r"---+\s*TOOL_RESULT:.*?---+\s*END\s*TOOL_RESULT\s*---+", "", display, flags=_re.DOTALL).strip()
+                        # Truncate very long answers
+                        if len(display) > 3000:
+                            display = display[:3000] + "\n... [truncated]"
+                        if display:
+                            from rich.panel import Panel
+                            from rich.markdown import Markdown
+                            console.print(Panel(
+                                Markdown(display),
+                                title="[bold green]Answer[/]",
+                                border_style="green",
+                                padding=(1, 2),
+                            ))
+
                     console.print(Rule(
                         f"[bold green]done[/] [dim]({model_used}{total_str})[/]",
                         style="green",
