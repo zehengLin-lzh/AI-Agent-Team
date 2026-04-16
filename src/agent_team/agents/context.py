@@ -15,16 +15,41 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:max_chars] + "\n... [truncated]"
 
 
-def build_pattern_context(patterns: list[dict], max_tokens: int = 1500) -> str:
-    """Format learned patterns for injection into agent prompts."""
-    if not patterns:
+def build_pattern_context(
+    patterns: list[dict] | None = None,
+    feedback: list[dict] | None = None,
+    max_tokens: int = 1500,
+) -> str:
+    """Format user feedback and learned patterns for injection into agent prompts.
+
+    User feedback is rendered first (higher priority) — these are explicit
+    corrections/preferences from the user.  Auto-learned patterns follow.
+    """
+    if not patterns and not feedback:
         return ""
-    lines = ["## Lessons from Past Sessions (avoid these known mistakes):"]
-    for p in patterns:
-        conf = p.get("confidence", 0.5)
-        desc = p.get("description", "")
-        cat = p.get("category", "unknown")
-        lines.append(f"- [{cat}] ({conf:.0%} confidence) {desc}")
+
+    lines = ["## Lessons from Past Sessions"]
+
+    # User feedback first — HIGH PRIORITY
+    if feedback:
+        lines.append("")
+        lines.append("### User feedback (HIGH PRIORITY — the user told you this directly)")
+        for f in feedback:
+            rule = f.get("rule", "")
+            rationale = f.get("rationale", "")
+            suffix = f" — {rationale}" if rationale else ""
+            lines.append(f"- {rule}{suffix}")
+
+    # Auto-learned patterns second
+    if patterns:
+        lines.append("")
+        lines.append("### Auto-learned patterns (avoid these known mistakes)")
+        for p in patterns:
+            conf = p.get("confidence", 0.5)
+            desc = p.get("description", "")
+            cat = p.get("category", "unknown")
+            lines.append(f"- [{cat}] ({conf:.0%} confidence) {desc}")
+
     text = "\n".join(lines)
     return truncate_to_tokens(text, max_tokens)
 

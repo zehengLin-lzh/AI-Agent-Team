@@ -90,6 +90,7 @@ class AgentTeam:
         self.memory_context = ""
         self.patterns_context = ""
         self.injected_pattern_ids: list[str] = []
+        self.injected_feedback_ids: list[str] = []
         self.session_context = ""
         self.mcp_tools_prompt = ""
         self.mcp_registry = None
@@ -1272,14 +1273,18 @@ class AgentTeam:
             except Exception:
                 pass
 
-            # Pre-session: query learned patterns for injection
+            # Pre-session: query user feedback + learned patterns for injection
             try:
                 from agent_team.memory.database import MemoryDB
                 _db = MemoryDB()
+                feedback = _db.get_relevant_feedback(min_confidence=0.6, limit=5)
                 patterns = _db.get_relevant_patterns(min_confidence=0.4, limit=10)
-                if patterns:
-                    self.patterns_context = build_pattern_context(patterns)
+                if feedback or patterns:
+                    self.patterns_context = build_pattern_context(
+                        feedback=feedback, patterns=patterns,
+                    )
                     self.injected_pattern_ids = [p["id"] for p in patterns]
+                    self.injected_feedback_ids = [f["id"] for f in feedback]
                 _db.close()
             except Exception:
                 pass
@@ -1391,15 +1396,17 @@ class AgentTeam:
                     if tasks:
                         await asyncio.gather(*tasks)
 
-            # Post-session: boost/decay injected patterns based on outcome
+            # Post-session: boost/decay injected patterns and feedback
             try:
-                if self.injected_pattern_ids:
+                if self.injected_pattern_ids or self.injected_feedback_ids:
                     from agent_team.memory.database import MemoryDB
                     _db = MemoryDB()
                     had_fixes = self.fix_loop_count > 0
                     delta = 0.05 if not had_fixes else -0.05
                     for pid in self.injected_pattern_ids:
                         _db.boost_pattern_confidence(pid, delta)
+                    for fid in self.injected_feedback_ids:
+                        _db.boost_feedback_confidence(fid, delta)
                     _db.close()
             except Exception:
                 pass

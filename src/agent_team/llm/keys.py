@@ -22,6 +22,7 @@ PROVIDER_KEY_NAMES: dict[str, str] = {
     "cohere": "COHERE_API_KEY",
     "together": "TOGETHER_API_KEY",
     "huggingface": "HF_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 # Where to get API keys
@@ -35,6 +36,7 @@ PROVIDER_KEY_URLS: dict[str, str] = {
     "cohere": "https://dashboard.cohere.com/api-keys",
     "together": "https://api.together.ai/settings/api-keys",
     "huggingface": "https://huggingface.co/settings/tokens",
+    "openrouter": "https://openrouter.ai/settings/keys",
 }
 
 

@@ -80,3 +80,9 @@ MAX_CONTEXT_TOKENS = 24000
 MAX_INPUT_LENGTH = 50000
 OLLAMA_NUM_CTX = 16384  # Ollama context window — must be set explicitly
                         # 32768 causes timeouts on 14B+ models; 16384 is safe for all
+
+# --- Web search settings ---
+WEB_SEARCH_SUMMARIZE: bool = True
+WEB_SEARCH_TOP_K: int = 5
+WEB_SEARCH_PER_BODY_CHARS: int = 600
+WEB_SEARCH_TOTAL_BYTES: int = 3000

@@ -1,12 +1,30 @@
 """MCP client — communicates with MCP servers via stdio (JSON-RPC 2.0)."""
+from __future__ import annotations
+
 import asyncio
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_team.mcp.config import MCPServerDef
+
+
+# Matches ${VAR_NAME} for environment variable expansion
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env_vars(env_dict: dict[str, str]) -> dict[str, str]:
+    """Expand ``${VAR_NAME}`` references in *env_dict* values from ``os.environ``."""
+    expanded: dict[str, str] = {}
+    for key, value in env_dict.items():
+        expanded[key] = _ENV_VAR_RE.sub(
+            lambda m: os.environ.get(m.group(1), ""),
+            value,
+        )
+    return expanded
 
 
 @dataclass
@@ -47,9 +65,19 @@ class MCPStdioClient:
         if self.server_def.type != "stdio":
             return False
 
+        # Skip Tavily server when no API key is available
+        if (
+            self.server_def.name == "tavily"
+            or "TAVILY_API_KEY" in self.server_def.env
+        ):
+            from agent_team.mcp.tavily_config import has_web_search
+
+            if not has_web_search():
+                return False
+
         try:
             env = os.environ.copy()
-            env.update(self.server_def.env)
+            env.update(_expand_env_vars(self.server_def.env))
 
             self._process = await asyncio.create_subprocess_exec(
                 self.server_def.command,

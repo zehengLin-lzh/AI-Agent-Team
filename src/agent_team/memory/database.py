@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from agent_team.config import MEMORY_DB_PATH, DATA_DIR
-from agent_team.memory.types import MemoryEntry, LearnedPattern
+from agent_team.memory.types import MemoryEntry, LearnedPattern, UserFeedback
 
 
 def _ensure_data_dir():
@@ -86,13 +86,39 @@ class MemoryDB:
                 created_at TEXT NOT NULL,
                 embedding BLOB
             );
+
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id TEXT PRIMARY KEY,
+                rule TEXT NOT NULL,
+                rationale TEXT,
+                category TEXT,
+                source_session_id TEXT,
+                source_message TEXT,
+                trigger TEXT NOT NULL,
+                confidence REAL DEFAULT 0.9,
+                times_applied INTEGER DEFAULT 0,
+                active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                embedding BLOB
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_feedback_active
+                ON user_feedback(active, confidence DESC);
         """)
-        # Create FTS5 table if not exists
+        # Create FTS5 tables if not exists
         try:
             self.conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                     content, id UNINDEXED, source UNINDEXED, content_type UNINDEXED
                 )
+            """)
+        except sqlite3.OperationalError:
+            pass  # Already exists
+        try:
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS user_feedback_fts
+                    USING fts5(rule, rationale, id UNINDEXED)
             """)
         except sqlite3.OperationalError:
             pass  # Already exists
@@ -231,6 +257,124 @@ class MemoryDB:
             (delta, pattern_id),
         )
         self.conn.commit()
+
+    # ── User Feedback ───────────────────────────────────────────────────────
+
+    def create_feedback(
+        self,
+        rule: str,
+        rationale: str | None,
+        trigger: str,
+        source_session_id: str | None = None,
+        source_message: str | None = None,
+        category: str | None = None,
+        confidence: float = 0.9,
+    ) -> str:
+        """Store a user feedback entry. Deduplicates against existing rules."""
+        existing_id = self.find_duplicate_feedback(rule)
+        if existing_id:
+            self.boost_feedback_confidence(existing_id)
+            return existing_id
+
+        feedback_id = uuid.uuid4().hex
+        now = datetime.now().isoformat()
+        self.conn.execute(
+            "INSERT INTO user_feedback "
+            "(id, rule, rationale, category, source_session_id, source_message, "
+            "trigger, confidence, times_applied, active, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)",
+            (feedback_id, rule, rationale, category, source_session_id,
+             source_message, trigger, confidence, now),
+        )
+        try:
+            self.conn.execute(
+                "INSERT INTO user_feedback_fts (rule, rationale, id) VALUES (?, ?, ?)",
+                (rule, rationale or "", feedback_id),
+            )
+        except Exception:
+            pass
+        self.conn.commit()
+        return feedback_id
+
+    def get_relevant_feedback(
+        self,
+        min_confidence: float = 0.6,
+        limit: int = 10,
+        category: str | None = None,
+    ) -> list[dict]:
+        """Get high-confidence user feedback for injection into agent context."""
+        if category:
+            rows = self.conn.execute(
+                "SELECT id, rule, rationale, category, confidence, times_applied, trigger "
+                "FROM user_feedback WHERE active = 1 AND confidence >= ? AND category = ? "
+                "ORDER BY confidence DESC, created_at DESC LIMIT ?",
+                (min_confidence, category, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT id, rule, rationale, category, confidence, times_applied, trigger "
+                "FROM user_feedback WHERE active = 1 AND confidence >= ? "
+                "ORDER BY confidence DESC, created_at DESC LIMIT ?",
+                (min_confidence, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_feedback(self, query: str, top_k: int = 5) -> list[dict]:
+        """Full-text search over user feedback rules."""
+        try:
+            rows = self.conn.execute(
+                "SELECT f.id, f.rule, f.rationale, f.category, f.confidence, f.times_applied "
+                "FROM user_feedback_fts fts "
+                "JOIN user_feedback f ON fts.id = f.id "
+                "WHERE user_feedback_fts MATCH ? AND f.active = 1 "
+                "ORDER BY fts.rank LIMIT ?",
+                (query, top_k),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def deactivate_feedback(self, feedback_id: str) -> bool:
+        """Deactivate a feedback entry (soft delete)."""
+        cursor = self.conn.execute(
+            "UPDATE user_feedback SET active = 0, updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), feedback_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def boost_feedback_confidence(self, feedback_id: str, delta: float = 0.05) -> None:
+        """Increase confidence and usage count for a feedback entry."""
+        self.conn.execute(
+            "UPDATE user_feedback SET confidence = MIN(1.0, confidence + ?), "
+            "times_applied = times_applied + 1, updated_at = ? WHERE id = ?",
+            (delta, datetime.now().isoformat(), feedback_id),
+        )
+        self.conn.commit()
+
+    def find_duplicate_feedback(self, rule: str) -> str | None:
+        """Check if a similar feedback rule already exists via FTS."""
+        try:
+            rows = self.conn.execute(
+                "SELECT fts.id, fts.rank FROM user_feedback_fts fts "
+                "JOIN user_feedback f ON fts.id = f.id "
+                "WHERE user_feedback_fts MATCH ? AND f.active = 1 "
+                "ORDER BY fts.rank LIMIT 1",
+                (rule,),
+            ).fetchall()
+            if rows and rows[0][1] < -5.0:  # Strong BM25 match (more negative = better)
+                return rows[0][0]
+        except Exception:
+            pass
+        return None
+
+    def list_active_feedback(self) -> list[dict]:
+        """List all active feedback entries."""
+        rows = self.conn.execute(
+            "SELECT id, rule, rationale, category, confidence, times_applied, trigger, created_at "
+            "FROM user_feedback WHERE active = 1 ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

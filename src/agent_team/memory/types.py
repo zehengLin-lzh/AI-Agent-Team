@@ -32,3 +32,19 @@ class LearnedPattern:
     confidence: float = 0.5
     times_applied: int = 0
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class UserFeedback:
+    id: str
+    rule: str
+    rationale: str | None
+    category: str | None
+    source_session_id: str | None
+    source_message: str | None
+    trigger: str  # 'slash' | 'auto' | 'learn-this'
+    confidence: float
+    times_applied: int
+    active: bool
+    created_at: str
+    updated_at: str | None

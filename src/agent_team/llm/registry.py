@@ -27,7 +27,7 @@ def _ensure_providers():
     from agent_team.llm.providers import (
         OpenAIProvider, AnthropicProvider, GoogleProvider,
         MistralProvider, GroqProvider, DeepSeekProvider,
-        CohereProvider, TogetherProvider,
+        CohereProvider, TogetherProvider, OpenRouterProvider,
     )
     _providers["openai"] = OpenAIProvider()
     _providers["anthropic"] = AnthropicProvider()
@@ -37,6 +37,7 @@ def _ensure_providers():
     _providers["deepseek"] = DeepSeekProvider()
     _providers["cohere"] = CohereProvider()
     _providers["together"] = TogetherProvider()
+    _providers["openrouter"] = OpenRouterProvider()
 
 
 def get_provider(name: str | None = None) -> LLMProvider:

@@ -2,6 +2,50 @@
 
 ---
 
+## v7.4.0 — Web Search + User-Feedback Self-Learning (2026-04-15)
+
+### Summary
+
+Two new capabilities: Tavily web search via MCP and a user-feedback self-learning system that persistently stores corrections and preferences, injecting them as high-priority context into future sessions.
+
+### Web Search (Tavily)
+
+- **New provider**: `mcp/providers/websearch.py` — matches Tavily tools by name (avoids param collision with APIProvider)
+- **Tool-name detection pass**: `detect_provider()` now checks `tool_name_patterns` before param-name matching, with full backward compatibility
+- **Prompt-injection defense**: `mcp/sanitizer.py` redacts `--- TOOL_CALL` substrings and known injection phrases, wraps results in fenced `UNTRUSTED` blocks, hard-caps at 3KB
+- **Offline-safe**: No Tavily API key → server silently skipped, agents never see web tools
+- **Config**: `mcp/tavily_config.py` provides `has_web_search()` flag; env var expansion in `mcp/client.py`
+
+### User-Feedback Self-Learning
+
+- **New table**: `user_feedback` with FTS5 full-text search, soft-delete, confidence scoring (0.85 auto / 0.95 learn-this / 1.0 slash)
+- **Feedback detector**: `learning/feedback.py` — LLM judge prompt classifies user messages as corrections; per-session cap of 3 auto-detections
+- **CLI commands**: `/remember`, `/forget`, `/learn-this`, `/feedback list`
+- **Context injection**: User feedback rendered FIRST in "Lessons from Past Sessions" with `HIGH PRIORITY` label, before auto-learned patterns
+- **Post-session boosting**: Feedback confidence boosted/decayed alongside patterns based on session outcome
+
+### Files Changed
+
+| New | Modified |
+|---|---|
+| `mcp/providers/websearch.py` | `mcp/providers/__init__.py` |
+| `mcp/sanitizer.py` | `mcp/tool_executor.py` |
+| `mcp/tavily_config.py` | `mcp/client.py` |
+| `learning/feedback.py` | `memory/database.py` |
+| `tests/test_sanitizer.py` | `memory/types.py` |
+| `tests/test_database_feedback.py` | `agents/runner.py` |
+| `tests/test_providers.py` | `agents/http_runner.py` |
+| | `agents/context.py` |
+| | `cli/interactive.py` |
+| | `config.py` |
+| | `mcp.json.example` |
+
+### Test Coverage
+
+46 tests covering: sanitizer injection redaction, tool-call parser spoof resistance, provider detection precedence, backward compatibility, feedback CRUD/FTS/dedup/soft-delete, context integration.
+
+---
+
 ## v7.3.0 — MCP Provider Pattern — Type-Specific Knowledge as Plugins (2026-04-07)
 
 ### Summary

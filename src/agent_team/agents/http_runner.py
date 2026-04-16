@@ -155,16 +155,21 @@ async def run_team_http(
     # Classify complexity for adaptive routing
     complexity = classify_complexity(user_plan, agent_mode.value)
 
-    # Query learned patterns for injection
+    # Query user feedback + learned patterns for injection
     patterns_context = ""
     injected_ids: list[str] = []
+    injected_feedback_ids: list[str] = []
     try:
         from agent_team.memory.database import MemoryDB
         _db = MemoryDB()
+        feedback = _db.get_relevant_feedback(min_confidence=0.6, limit=5)
         patterns = _db.get_relevant_patterns(min_confidence=0.4, limit=10)
-        if patterns:
-            patterns_context = build_pattern_context(patterns)
+        if feedback or patterns:
+            patterns_context = build_pattern_context(
+                feedback=feedback, patterns=patterns,
+            )
             injected_ids = [p["id"] for p in patterns]
+            injected_feedback_ids = [f["id"] for f in feedback]
         _db.close()
     except Exception:
         pass
@@ -349,15 +354,17 @@ async def run_team_http(
                 ]
             )
 
-    # Boost/decay injected patterns based on outcome
+    # Boost/decay injected patterns and feedback based on outcome
     try:
-        if injected_ids:
+        if injected_ids or injected_feedback_ids:
             from agent_team.memory.database import MemoryDB
             _db = MemoryDB()
             had_fixes = fix_count > 0
             delta = 0.05 if not had_fixes else -0.05
             for pid in injected_ids:
                 _db.boost_pattern_confidence(pid, delta)
+            for fid in injected_feedback_ids:
+                _db.boost_feedback_confidence(fid, delta)
             _db.close()
     except Exception:
         pass

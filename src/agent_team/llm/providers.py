@@ -349,3 +349,33 @@ class TogetherProvider(OpenAICompatProvider):
         "deepseek-ai/DeepSeek-V3",
         "google/gemma-2-27b-it",
     ]
+
+
+# ── OpenRouter ──────────────────────────────────────────────────────────────
+
+class OpenRouterProvider(OpenAICompatProvider):
+    """OpenRouter — unified API for 200+ models including free tiers.
+
+    Free models (append `:free` to model name) have rate limits
+    (~20 req/min, ~200/day) but are great for lightweight tasks
+    like feedback judge calls and web-search summarization.
+
+    Sign up: https://openrouter.ai  →  Keys  →  Create Key
+    """
+    name = "openrouter"
+    api_base = "https://openrouter.ai/api/v1"
+    key_provider = "openrouter"
+    default_model = "nvidia/nemotron-3-super-120b-a12b:free"
+    max_tokens = 4096
+    models = [
+        # Free tier models (verified available April 2026)
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        # Paid models (use your credits)
+        "anthropic/claude-sonnet-4",
+        "openai/gpt-4o",
+        "google/gemini-2.5-pro-preview",
+    ]

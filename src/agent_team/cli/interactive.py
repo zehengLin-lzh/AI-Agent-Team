@@ -41,6 +41,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError
 
 from agent_team.agents.session import SessionContext
+from agent_team.learning.feedback import detect_feedback, extract_and_store, MAX_AUTO_PER_SESSION
 
 # ── Branding & Config ────────────────────────────────────────────────────────
 
@@ -150,6 +151,7 @@ class CLIState:
     session: SessionContext = field(default_factory=SessionContext)
     user_cwd: str = field(default_factory=_get_user_cwd)  # Where the user launched from
     mcp_data_returned: bool = False  # Set True when MCP tools return data (skip execute prompt)
+    auto_feedback_count: int = 0  # Auto-detected feedback count this session
 
 state = CLIState()
 
@@ -385,6 +387,10 @@ def render_help():
         ("/cd <path>", "Change working directory"),
         ("/pwd", "Show current working directory"),
         ("/skills", "List installed skills"),
+        ("/remember <text>", "Store a rule or preference the agent should remember"),
+        ("/forget <id_or_query>", "Deactivate a remembered rule by ID or search"),
+        ("/learn-this", "Extract a rule from the last assistant message"),
+        ("/feedback list", "Show all active feedback rules"),
         ("/exit, /quit", "Exit the CLI"),
     ]
     for cmd, desc in commands:
@@ -1931,6 +1937,173 @@ async def handle_followup() -> str | None:
     return followup if followup else None
 
 
+# ── Feedback Commands ────────────────────────────────────────────────────────
+
+async def handle_remember_command(args: str):
+    """Handle /remember — store a user-specified rule."""
+    text = args.strip()
+    if not text:
+        console.print("[warning]Usage: /remember <rule or preference>[/]")
+        return
+
+    from agent_team.memory.database import MemoryDB
+    db = MemoryDB()
+    try:
+        feedback_id = await extract_and_store(
+            user_msg=text,
+            session_id=state.session.session_id,
+            trigger="slash",
+            rule=text,
+            db=db,
+        )
+        if feedback_id:
+            display = text[:60] + ("..." if len(text) > 60 else "")
+            console.print(f"[success]\u2713 Remembered: {display}[/]")
+        else:
+            console.print("[error]Failed to store feedback.[/]")
+    finally:
+        db.close()
+
+
+async def handle_forget_command(args: str):
+    """Handle /forget — deactivate a feedback rule by ID or search query."""
+    query = args.strip()
+    if not query:
+        console.print("[warning]Usage: /forget <id or search query>[/]")
+        return
+
+    import re as _re
+    from agent_team.memory.database import MemoryDB
+    db = MemoryDB()
+    try:
+        # Check if it looks like a hex UUID (32+ hex chars)
+        if _re.match(r'^[0-9a-f]{32,}$', query):
+            if db.deactivate_feedback(query):
+                console.print(f"[success]\u2713 Deactivated feedback {query[:8]}...[/]")
+            else:
+                console.print(f"[warning]No active feedback found with ID {query[:8]}...[/]")
+            return
+
+        # Otherwise search by text
+        matches = db.search_feedback(query)
+        if not matches:
+            console.print(f"[muted]No matching feedback found for '{query}'.[/]")
+            return
+
+        # Display numbered matches
+        console.print()
+        for i, m in enumerate(matches, 1):
+            console.print(
+                f"  [bold]{i}.[/] [{m['id'][:8]}] {m['rule'][:70]} "
+                f"[dim](confidence: {m['confidence']:.2f})[/]"
+            )
+        console.print()
+        console.print("[dim]Enter number to deactivate, or press Enter to cancel:[/]")
+
+        choice = input("  > ").strip()
+        if not choice:
+            console.print("[muted]Cancelled.[/]")
+            return
+
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(matches):
+                fid = matches[idx]["id"]
+                if db.deactivate_feedback(fid):
+                    console.print(f"[success]\u2713 Deactivated: {matches[idx]['rule'][:60]}[/]")
+                else:
+                    console.print("[error]Failed to deactivate.[/]")
+            else:
+                console.print("[warning]Invalid selection.[/]")
+        except ValueError:
+            console.print("[warning]Invalid selection.[/]")
+    finally:
+        db.close()
+
+
+async def handle_learn_this_command():
+    """Handle /learn-this — extract a rule from the last assistant message."""
+    # Find the last agent message from session history
+    last_agent_msg = None
+    for msg in reversed(state.session.messages):
+        if msg.role == "agent":
+            last_agent_msg = msg.content
+            break
+
+    if not last_agent_msg:
+        console.print("[warning]No recent assistant message to learn from.[/]")
+        return
+
+    from agent_team.memory.database import MemoryDB
+    from agent_team.llm import call_llm
+
+    db = MemoryDB()
+    try:
+        # Adapter to match the llm_provider.call() interface expected by detect_feedback
+        class _LLMBridge:
+            async def call(self, system_prompt, messages, temperature=0.1):
+                return await call_llm(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    temperature=temperature,
+                )
+
+        feedback_id = await extract_and_store(
+            user_msg=last_agent_msg[:500],
+            session_id=state.session.session_id,
+            trigger="learn-this",
+            db=db,
+            llm_provider=_LLMBridge(),
+        )
+        if feedback_id:
+            console.print(f"[success]\u2713 Learned from last assistant message (id: {feedback_id[:8]}...)[/]")
+        else:
+            console.print("[muted]No actionable feedback detected in the last message.[/]")
+    except Exception as e:
+        console.print(f"[error]Failed to extract feedback: {e}[/]")
+    finally:
+        db.close()
+
+
+def handle_feedback_list_command():
+    """Handle /feedback list — show all active feedback rules."""
+    from agent_team.memory.database import MemoryDB
+    db = MemoryDB()
+    try:
+        entries = db.list_active_feedback()
+        if not entries:
+            console.print("[muted]No active feedback rules. Use /remember to add one.[/]")
+            return
+
+        table = Table(
+            title="Active Feedback Rules",
+            title_style="bold white",
+            border_style="cyan",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("ID", style="dim", max_width=8)
+        table.add_column("Category", style="bold", max_width=10)
+        table.add_column("Rule", style="white")
+        table.add_column("Conf", justify="right", style="green", max_width=6)
+        table.add_column("Used", justify="right", style="dim", max_width=5)
+
+        for entry in entries:
+            table.add_row(
+                entry["id"][:8],
+                entry.get("category") or "-",
+                entry["rule"][:60],
+                f"{entry['confidence']:.2f}",
+                str(entry["times_applied"]),
+            )
+
+        console.print()
+        console.print(table)
+        console.print()
+    finally:
+        db.close()
+
+
 # ── Bottom Toolbar ───────────────────────────────────────────────────────────
 
 def get_bottom_toolbar():
@@ -2127,6 +2300,21 @@ async def main():
                         )
                         state.conversation_count += 1
 
+                elif cmd == "/remember":
+                    await handle_remember_command(args)
+
+                elif cmd == "/forget":
+                    await handle_forget_command(args)
+
+                elif cmd == "/learn-this":
+                    await handle_learn_this_command()
+
+                elif cmd == "/feedback":
+                    if args.strip().lower() == "list":
+                        handle_feedback_list_command()
+                    else:
+                        console.print("[warning]Usage: /feedback list[/]")
+
                 else:
                     console.print(f"[warning]Unknown command: {cmd}. Type /help for available commands.[/]")
 
@@ -2139,6 +2327,43 @@ async def main():
                 if not connected:
                     console.print("[error]Backend not connected. Try /status to reconnect.[/]")
                     continue
+
+            # ── Auto-detect user feedback (non-blocking) ──────────────
+            try:
+                if (
+                    len(user_input) >= 15
+                    and state.auto_feedback_count < MAX_AUTO_PER_SESSION
+                ):
+                    from agent_team.llm import call_llm as _call_llm
+
+                    class _AutoBridge:
+                        async def call(self, system_prompt, messages, temperature=0.1):
+                            return await _call_llm(
+                                system_prompt=system_prompt,
+                                messages=messages,
+                                temperature=temperature,
+                            )
+
+                    _fb_result = await detect_feedback(user_input, _AutoBridge())
+                    if _fb_result:
+                        from agent_team.memory.database import MemoryDB as _MemDB
+                        _fb_db = _MemDB()
+                        try:
+                            _fb_id = await extract_and_store(
+                                user_msg=user_input,
+                                session_id=state.session.session_id,
+                                trigger="auto",
+                                db=_fb_db,
+                                llm_provider=_AutoBridge(),
+                            )
+                            if _fb_id:
+                                _rule = _fb_result.get("rule", "")[:60]
+                                console.print(f"[dim][learned: {_rule}][/]")
+                                state.auto_feedback_count += 1
+                        finally:
+                            _fb_db.close()
+            except Exception:
+                pass  # Never break the main loop
 
             # Auto-detect mode
             detected_mode = auto_detect_mode(user_input)

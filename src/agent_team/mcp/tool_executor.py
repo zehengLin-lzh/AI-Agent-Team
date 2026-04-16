@@ -1,7 +1,15 @@
 """Tool executor — parse tool calls from LLM output and execute via MCP."""
+from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass
+
+from agent_team.mcp.sanitizer import sanitize_web_result
+from agent_team.mcp.providers.websearch import WebSearchProvider
+
+# Tool names that produce untrusted web content requiring sanitization
+_WEB_TOOL_NAMES: set[str] = set(WebSearchProvider.tool_name_patterns)
 
 
 @dataclass
@@ -71,11 +79,17 @@ async def execute_tool_calls(text: str, registry) -> tuple[str, list[dict]]:
 
     for call in calls:
         result = await registry.call_tool_by_name(call.tool_name, call.arguments)
-        updated_text = inject_tool_results(updated_text, call, result.content)
+
+        # Sanitize untrusted web content before it enters the conversation
+        content = result.content
+        if call.tool_name in _WEB_TOOL_NAMES and not result.is_error:
+            content = sanitize_web_result(content)
+
+        updated_text = inject_tool_results(updated_text, call, content)
         execution_log.append({
             "tool": call.tool_name,
             "arguments": call.arguments,
-            "result": result.content[:3000],
+            "result": content[:3000],
             "is_error": result.is_error,
         })
 
