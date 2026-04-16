@@ -1,7 +1,12 @@
 """Abstract LLM provider interface."""
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from fastapi import WebSocket
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 
 @dataclass
@@ -88,7 +93,7 @@ class LLMProvider(ABC):
         self,
         system_prompt: str,
         messages: list[dict],
-        ws: WebSocket,
+        emitter: EventEmitter,
         agent_name: str,
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
@@ -96,7 +101,7 @@ class LLMProvider(ABC):
         display_name: str = "",
         model_override: str | None = None,
     ) -> str:
-        """Stream a response, sending tokens over WebSocket. Returns full response."""
+        """Stream a response, emitting tokens via EventEmitter. Returns full response."""
         ...
 
     @abstractmethod

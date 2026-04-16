@@ -5,9 +5,35 @@ from pathlib import Path
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE_URL = "http://localhost:11434"
-MODEL = "qwen2.5-coder:7b"
-THINKING_MODEL = "qwen3:14b"  # Used for THINKER, CHALLENGER, debate phases
 EMBEDDING_MODEL = "nomic-embed-text"
+
+# ── Provider-aware model defaults ──────────────────────────────────────────
+# Detect active provider to set appropriate model names.
+# Ollama uses local model tags; OpenRouter uses org/model:variant format.
+
+def _detect_provider() -> str:
+    """Quick provider detection for config-time model selection."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    try:
+        from pathlib import Path as _P
+        env_file = _P(__file__).resolve().parent.parent.parent / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("OPENROUTER_API_KEY=") and line.split("=", 1)[1].strip():
+                    return "openrouter"
+    except Exception:
+        pass
+    return "ollama"
+
+_PROVIDER = _detect_provider()
+
+if _PROVIDER == "openrouter":
+    MODEL = "qwen/qwen3-coder:free"
+    THINKING_MODEL = "google/gemma-4-31b-it:free"
+else:
+    MODEL = "qwen2.5-coder:7b"
+    THINKING_MODEL = "qwen3:14b"
 
 # ── Three-tier model routing ────────────────────────────────────────────────
 FAST_MODEL = MODEL                  # Chat/ask/orchestrator — lightweight conversation
@@ -62,6 +88,10 @@ MEDIUM_MODEL_ROUTING: dict[str, str] = {
     "REV_QUINN": REASONING_MODEL,
     "REV_LENA": FAST_MODEL,   # lighter review for medium tasks
 }
+
+# ── Task graph routing (Phase 2) ───────────────────────────────────────────
+USE_TASK_GRAPH = True   # Use TaskGraph executor; False falls back to legacy loop
+DYNAMIC_ROUTING = False  # Use LLM-assisted routing (requires USE_TASK_GRAPH)
 
 MAX_FIX_LOOPS = 3
 MAX_TOOL_ROUNDS = 3  # Max tool-call → see-result → reason iterations per agent

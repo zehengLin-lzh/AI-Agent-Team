@@ -3,10 +3,15 @@
 Each provider is a thin subclass of OpenAICompatProvider with
 provider-specific base URL, models, and key configuration.
 """
+from __future__ import annotations
+
 import json
 import time
 import httpx
-from fastapi import WebSocket
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 from agent_team.llm.openai_compat import OpenAICompatProvider
 from agent_team.llm.base import TokenStats, SessionTokenTracker
@@ -69,7 +74,7 @@ class AnthropicProvider(OpenAICompatProvider):
         self,
         system_prompt: str,
         messages: list[dict],
-        ws: WebSocket,
+        emitter: EventEmitter,
         agent_name: str,
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
@@ -98,7 +103,6 @@ class AnthropicProvider(OpenAICompatProvider):
         }
 
         start_msg: dict = {
-            "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
@@ -106,15 +110,14 @@ class AnthropicProvider(OpenAICompatProvider):
         }
         if display_name:
             start_msg["display_name"] = display_name
-        await ws.send_json(start_msg)
+        await emitter.emit("agent_start", start_msg)
 
         agent_stats = TokenStats()
         start_time = time.monotonic_ns()
 
         try:
             if not has_key(self.key_provider):
-                await ws.send_json({
-                    "type": "error",
+                await emitter.emit("error", {
                     "agent": agent_name,
                     "content": (
                         f"No API key for {self.name}. "
@@ -122,7 +125,7 @@ class AnthropicProvider(OpenAICompatProvider):
                         f"or get one at: {PROVIDER_KEY_URLS.get(self.key_provider, '')}"
                     ),
                 })
-                await ws.send_json({"type": "agent_done", "agent": agent_name, "token_stats": {}})
+                await emitter.emit("agent_done", {"agent": agent_name, "token_stats": {}})
                 return ""
 
             from agent_team.llm.openai_compat import _get_client
@@ -134,12 +137,11 @@ class AnthropicProvider(OpenAICompatProvider):
                 if response.status_code != 200:
                     body = await response.aread()
                     error_msg = body.decode("utf-8", errors="replace")[:500]
-                    await ws.send_json({
-                        "type": "error",
+                    await emitter.emit("error", {
                         "agent": agent_name,
                         "content": f"Anthropic API error ({response.status_code}): {error_msg}",
                     })
-                    await ws.send_json({"type": "agent_done", "agent": agent_name, "token_stats": {}})
+                    await emitter.emit("agent_done", {"agent": agent_name, "token_stats": {}})
                     return ""
 
                 async for line in response.aiter_lines():
@@ -157,8 +159,7 @@ class AnthropicProvider(OpenAICompatProvider):
                             token = delta.get("text", "")
                             if token:
                                 full_response += token
-                                await ws.send_json({
-                                    "type": "token",
+                                await emitter.emit("token", {
                                     "agent": agent_name,
                                     "content": token,
                                 })
@@ -178,8 +179,7 @@ class AnthropicProvider(OpenAICompatProvider):
                         continue
 
         except Exception as e:
-            await ws.send_json({
-                "type": "error",
+            await emitter.emit("error", {
                 "agent": agent_name,
                 "content": f"Anthropic error: {str(e)}",
             })
@@ -191,8 +191,7 @@ class AnthropicProvider(OpenAICompatProvider):
         if token_tracker:
             token_tracker.record(agent_name, agent_stats)
 
-        await ws.send_json({
-            "type": "agent_done",
+        await emitter.emit("agent_done", {
             "agent": agent_name,
             "token_stats": {
                 "prompt_tokens": agent_stats.prompt_tokens,

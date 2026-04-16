@@ -1,14 +1,20 @@
 """Agent team runner -- orchestrates agents through mode-specific pipelines."""
+from __future__ import annotations
+
 import asyncio
 import json
 import re
-from fastapi import WebSocket, WebSocketDisconnect
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 from agent_team.config import (
     MAX_FIX_LOOPS, MAX_TOOL_ROUNDS, MAX_CONTEXT_TOKENS, REPO_ROOT,
     MODEL_ROUTING, SIMPLE_MODEL_ROUTING, MEDIUM_MODEL_ROUTING,
     DISCUSSION_MAX_OUTPUT_TOKENS, MAX_SUBAGENTS_PER_AGENT,
     SUBAGENT_MAX_INPUT_TOKENS, SUBAGENT_MAX_OUTPUT_TOKENS, FAST_MODEL,
+    USE_TASK_GRAPH,
 )
 from agent_team.agents.definitions import (
     AgentMode, AGENT_COLORS, MODE_PHASE_ORDER, SIMPLE_PHASE_ORDER, MODE_TEMPERATURES,
@@ -47,36 +53,40 @@ def _parse_column_names_from_description(description: str) -> list[str]:
     return columns
 
 
-class _LockedWebSocket:
-    """Wrapper that serializes send_json calls for parallel-safe WebSocket writes."""
+class _EmitterCompat:
+    """Thin shim: translates self.ws.send_json({"type": X, ...}) → emitter.emit(X, rest).
 
-    def __init__(self, ws: WebSocket, lock: asyncio.Lock):
-        self._ws = ws
-        self._lock = lock
+    Allows the 20+ send_json call sites in AgentTeam to remain unchanged
+    while all I/O actually flows through the EventEmitter protocol.
+    Also bridges receive_text() → emitter.receive().
+    """
+
+    def __init__(self, emitter: EventEmitter):
+        self._emitter = emitter
 
     async def send_json(self, data: dict) -> None:
-        async with self._lock:
-            await self._ws.send_json(data)
+        event_type = data.get("type", "unknown")
+        rest = {k: v for k, v in data.items() if k != "type"}
+        await self._emitter.emit(event_type, rest)
 
     async def receive_text(self) -> str:
-        return await self._ws.receive_text()
-
-    async def close(self, *args, **kwargs):
-        await self._ws.close(*args, **kwargs)
+        data = await self._emitter.receive()
+        return json.dumps(data) if isinstance(data, dict) else str(data)
 
 
 class AgentTeam:
     def __init__(
         self,
-        ws: WebSocket,
+        emitter: EventEmitter,
         execution_path: str | None = None,
         plan_only: bool = False,
         reuse_plan: bool = False,
         prior_phase_outputs: dict[str, str] | None = None,
     ):
-        self._raw_ws = ws
-        self._ws_lock = asyncio.Lock()  # Protects ws.send_json for parallel agents
-        self.ws = _LockedWebSocket(ws, self._ws_lock)
+        self.emitter = emitter
+        # Compatibility shim: self.ws.send_json({"type": X, ...}) still works
+        # by extracting "type" and delegating to emitter.emit(type, rest).
+        self.ws = _EmitterCompat(emitter)
         self.execution_path = execution_path
         self.plan_only = plan_only
         self.reuse_plan = reuse_plan
@@ -660,7 +670,7 @@ class AgentTeam:
                 output = await stream_llm(
                     system_prompt=system_prompt,
                     messages=messages,
-                    ws=self.ws,
+                    emitter=self.emitter,
                     agent_name=agent_name,
                     agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
                     temperature=temperature,
@@ -740,7 +750,7 @@ class AgentTeam:
                             f"Integrate these findings into your final analysis."
                         )},
                     ],
-                    ws=self.ws,
+                    emitter=self.emitter,
                     agent_name=f"{agent_name}_INTEGRATE",
                     agent_color=AGENT_COLORS.get(agent_name, "#ffffff"),
                     temperature=temperature,
@@ -1052,7 +1062,7 @@ class AgentTeam:
         challenger_output = await stream_llm(
             system_prompt=DEBATE_CHALLENGER_PROMPT,
             messages=challenge_messages,
-            ws=self.ws,
+            emitter=self.emitter,
             agent_name="CHALLENGER",
             agent_color="#ff6b6b",
             temperature=temperature + 0.1,
@@ -1079,7 +1089,7 @@ class AgentTeam:
         refined_output = await stream_llm(
             system_prompt=DEBATE_RESPONSE_PROMPT,
             messages=response_messages,
-            ws=self.ws,
+            emitter=self.emitter,
             agent_name="THINKER_REFINED",
             agent_color="#c084fc",
             temperature=temperature,
@@ -1211,6 +1221,90 @@ class AgentTeam:
 
                 await self.run_reviewer()  # Re-review
 
+    async def _run_legacy_pipeline(self, user_plan: str):
+        """Legacy pipeline loop — iterates static phase orders. Preserved for fallback."""
+        if self.complexity == TaskComplexity.SIMPLE:
+            full_phase_order = list(SIMPLE_PHASE_ORDER.get(
+                self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
+            ))
+        elif self.complexity == TaskComplexity.MEDIUM:
+            full_phase_order = list(MEDIUM_PHASE_ORDER.get(
+                self.mode, MEDIUM_PHASE_ORDER[AgentMode.CODING]
+            ))
+        else:
+            full_phase_order = list(COMPLEX_PHASE_ORDER.get(
+                self.mode, COMPLEX_PHASE_ORDER[AgentMode.CODING]
+            ))
+
+        _exec_rev_ids = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE",
+                         "REVIEWER", "REV_QUINN", "REV_LENA"}
+        if self.reuse_plan and self.prior_phase_outputs:
+            self.phase_outputs.update(self.prior_phase_outputs)
+            phase_order = [g for g in full_phase_order
+                           if _exec_rev_ids.intersection(g)]
+            if not phase_order:
+                phase_order = [["EXECUTOR"], ["REVIEWER"]]
+        elif self.plan_only:
+            phase_order = [g for g in full_phase_order
+                           if not _exec_rev_ids.intersection(g)]
+        else:
+            phase_order = full_phase_order
+
+        await self.ws.send_json({
+            "type": "status",
+            "phase": "complexity",
+            "message": f"Task complexity: {self.complexity.value.upper()} → {len(phase_order)} phases",
+        })
+        await self._validate_model_routing()
+
+        _LEGACY_HANDLERS = {
+            "ORCHESTRATOR": self.run_orchestrator,
+            "THINKER": self.run_thinker,
+            "PLANNER": self.run_planner,
+            "EXECUTOR": self.run_executor,
+            "REVIEWER": self.run_reviewer,
+        }
+
+        for phase_group in phase_order:
+            is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
+
+            if is_named:
+                stage_name = self._get_stage_name(phase_group)
+                await self.run_stage(phase_group, stage_name)
+                if stage_name == "planner":
+                    plan_out = self.phase_outputs.get("STAGE_PLANNER", "")
+                    if plan_out:
+                        self.phase_outputs["PLANNER"] = plan_out
+                        self.original_plan_output = plan_out
+                        if not self.plan_only:
+                            scaffold_plan_paths(plan_out, execution_path=self.execution_path)
+                        save_plan_markdown(
+                            title=next((ln for ln in plan_out.splitlines() if ln.strip()), "Plan"),
+                            plan_text=plan_out,
+                            execution_path=self.execution_path,
+                            mode=self.mode.value,
+                        )
+                        if self.mcp_registry:
+                            await self._auto_execute_from_output(plan_out)
+                elif stage_name == "executor":
+                    exec_out = self.phase_outputs.get("STAGE_EXECUTOR", "")
+                    if exec_out:
+                        self.phase_outputs["EXECUTOR"] = exec_out
+                        await self._write_executor_files(exec_out)
+                await self._handle_stage_handoff(stage_name)
+
+            elif len(phase_group) == 1:
+                agent = phase_group[0]
+                handler = _LEGACY_HANDLERS.get(agent)
+                if handler:
+                    await handler()
+                if agent == "THINKER" and self.complexity != TaskComplexity.SIMPLE:
+                    await self.run_debate()
+            else:
+                tasks = [_LEGACY_HANDLERS[a]() for a in phase_group if a in _LEGACY_HANDLERS]
+                if tasks:
+                    await asyncio.gather(*tasks)
+
     async def run(self, user_plan: str, mode: str = "coding"):
         """Main entry point -- run the full agent pipeline."""
         self.original_plan = user_plan
@@ -1252,9 +1346,12 @@ class AgentTeam:
                     pass
 
             # Classify task complexity for adaptive routing
-            self.complexity = classify_complexity(user_plan, self.mode.value)
+            from agent_team.agents.complexity import classify_task
+            task_classification = classify_task(user_plan, self.mode.value)
+            self.complexity = task_classification.complexity
             await self.send_status(
-                f"Task classified as: {self.complexity.value}", "setup"
+                f"Task: {self.complexity.value.upper()} / domain: {task_classification.domain}",
+                "setup",
             )
 
             # Pre-session: query memory for relevant context
@@ -1296,105 +1393,95 @@ class AgentTeam:
                 else:
                     self.memory_context = self.session_context
 
-            # Select phase order based on complexity
-            if self.complexity == TaskComplexity.SIMPLE:
-                full_phase_order = list(SIMPLE_PHASE_ORDER.get(
-                    self.mode, SIMPLE_PHASE_ORDER[AgentMode.CODING]
-                ))
-            elif self.complexity == TaskComplexity.MEDIUM:
-                full_phase_order = list(MEDIUM_PHASE_ORDER.get(
-                    self.mode, MEDIUM_PHASE_ORDER[AgentMode.CODING]
-                ))
-            else:  # COMPLEX
-                full_phase_order = list(COMPLEX_PHASE_ORDER.get(
-                    self.mode, COMPLEX_PHASE_ORDER[AgentMode.CODING]
-                ))
+            # ── Task Graph path (Phase 2) ──────────────────────────────────
+            if USE_TASK_GRAPH:
+                from agent_team.agents.router import TaskRouter
+                from agent_team.agents.task_graph import GraphExecutor
+                from agent_team.domains import get_domain_for_task
+                from agent_team.artifacts import ArtifactStore
 
-            # A5: If reusing a prior plan, inject outputs and skip to EXECUTOR+REVIEWER
-            _exec_rev_ids = {"EXECUTOR", "EXEC_KAI", "EXEC_DEV", "EXEC_SAGE",
-                             "REVIEWER", "REV_QUINN", "REV_LENA"}
-            if self.reuse_plan and self.prior_phase_outputs:
-                self.phase_outputs.update(self.prior_phase_outputs)
-                # Use executor+reviewer stages from the correct phase order
-                phase_order = [g for g in full_phase_order
-                               if _exec_rev_ids.intersection(g)]
-                if not phase_order:
-                    phase_order = [["EXECUTOR"], ["REVIEWER"]]
-            elif self.plan_only:
-                # A1: Skip EXECUTOR and REVIEWER when plan_only
-                phase_order = [g for g in full_phase_order
-                               if not _exec_rev_ids.intersection(g)]
+                # Detect domain and create artifact store
+                domain_plugin = get_domain_for_task(user_plan)
+                artifact_store = ArtifactStore()
+                await self.send_status(
+                    f"Domain: {domain_plugin.name}", "setup",
+                )
+
+                router = TaskRouter()
+                graph = router.route(
+                    task_classification, self.mode,
+                    plan_only=self.plan_only,
+                    reuse_plan=self.reuse_plan,
+                    domain_plugin=domain_plugin,
+                )
+
+                await self.ws.send_json({
+                    "type": "status",
+                    "phase": "graph",
+                    "message": f"Task graph: {len(graph.nodes)} nodes ({domain_plugin.name} domain)",
+                })
+
+                executor = GraphExecutor(self, graph)
+                await executor.execute()
+
+                # Post-stage processing: planner output
+                plan_out = graph.stage_output("planner")
+                if plan_out:
+                    self.phase_outputs["PLANNER"] = plan_out
+                    if not self.plan_only:
+                        scaffold_plan_paths(plan_out, execution_path=self.execution_path)
+                    save_plan_markdown(
+                        title=next((ln for ln in plan_out.splitlines() if ln.strip()), "Plan"),
+                        plan_text=plan_out,
+                        execution_path=self.execution_path,
+                        mode=self.mode.value,
+                    )
+                    if self.mcp_registry:
+                        await self._auto_execute_from_output(plan_out)
+
+                # Post-stage: parse executor output into artifacts via domain plugin
+                exec_out = graph.stage_output("executor")
+                if exec_out:
+                    self.phase_outputs["EXECUTOR"] = exec_out
+                    artifacts = domain_plugin.parse_output(exec_out)
+                    for a in artifacts:
+                        a.producer = "executor"
+                        artifact_store.add(a)
+
+                    # Validate artifacts
+                    issues = domain_plugin.validate(artifacts)
+                    if issues:
+                        await self.send_status(
+                            f"Validation: {len(issues)} issue(s) found", "review",
+                        )
+
+                    # Write code file artifacts to disk (coding domain)
+                    from agent_team.artifacts.renderer import write_code_artifacts
+                    file_changes = write_code_artifacts(
+                        artifacts, execution_path=self.execution_path,
+                    )
+                    if file_changes:
+                        await self.ws.send_json({
+                            "type": "file_changes",
+                            "changes": file_changes,
+                        })
+
+                    # Emit artifact summary
+                    if artifact_store.count > 0:
+                        from agent_team.artifacts.renderer import render_artifact_summary
+                        summaries = [render_artifact_summary(a) for a in artifact_store.all()]
+                        await self.send_status(
+                            f"Artifacts: {', '.join(summaries)}", "artifacts",
+                        )
+
+                # Post-session: boost/decay patterns, learning, completion
+                # (shared with legacy path — falls through below)
+
+            # ── Legacy pipeline path ───────────────────────────────────────
             else:
-                phase_order = full_phase_order
+                await self._run_legacy_pipeline(user_plan)
 
-            # Log complexity classification to CLI
-            await self.ws.send_json({
-                "type": "status",
-                "phase": "complexity",
-                "message": f"Task complexity: {self.complexity.value.upper()} → {len(phase_order)} phases",
-            })
-
-            # Pre-session: validate model availability
-            await self._validate_model_routing()
-
-            # -- Main pipeline loop --
-            _LEGACY_HANDLERS = {
-                "ORCHESTRATOR": self.run_orchestrator,
-                "THINKER": self.run_thinker,
-                "PLANNER": self.run_planner,
-                "EXECUTOR": self.run_executor,
-                "REVIEWER": self.run_reviewer,
-            }
-
-            for phase_group in phase_order:
-                is_named = any(a in AGENT_REGISTRY_MAP for a in phase_group)
-
-                if is_named:
-                    # Multi-agent pipeline (MEDIUM/COMPLEX)
-                    stage_name = self._get_stage_name(phase_group)
-                    await self.run_stage(phase_group, stage_name)
-
-                    # Post-stage processing for named agents
-                    if stage_name == "planner":
-                        plan_out = self.phase_outputs.get(f"STAGE_PLANNER", "")
-                        if plan_out:
-                            self.phase_outputs["PLANNER"] = plan_out  # compat
-                            self.original_plan_output = plan_out
-                            if not self.plan_only:
-                                scaffold_plan_paths(plan_out, execution_path=self.execution_path)
-                            save_plan_markdown(
-                                title=next((ln for ln in plan_out.splitlines() if ln.strip()), "Plan"),
-                                plan_text=plan_out,
-                                execution_path=self.execution_path,
-                                mode=self.mode.value,
-                            )
-                            # Auto-execute SQL if MCP db tools are available
-                            if self.mcp_registry:
-                                await self._auto_execute_from_output(plan_out)
-                    elif stage_name == "executor":
-                        # Trigger file writing from executor output
-                        exec_out = self.phase_outputs.get(f"STAGE_EXECUTOR", "")
-                        if exec_out:
-                            self.phase_outputs["EXECUTOR"] = exec_out  # compat
-                            await self._write_executor_files(exec_out)
-
-                    # Check handoff status
-                    await self._handle_stage_handoff(stage_name)
-
-                elif len(phase_group) == 1:
-                    # Legacy single-agent (SIMPLE)
-                    agent = phase_group[0]
-                    handler = _LEGACY_HANDLERS.get(agent)
-                    if handler:
-                        await handler()
-                    # Run debate after THINKER (skip for simple tasks)
-                    if agent == "THINKER" and self.complexity != TaskComplexity.SIMPLE:
-                        await self.run_debate()
-                else:
-                    # Legacy parallel group (shouldn't happen in SIMPLE, but just in case)
-                    tasks = [_LEGACY_HANDLERS[a]() for a in phase_group if a in _LEGACY_HANDLERS]
-                    if tasks:
-                        await asyncio.gather(*tasks)
+            # ── Post-session (shared by both paths) ──────────────────────
 
             # Post-session: boost/decay injected patterns and feedback
             try:

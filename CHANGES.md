@@ -2,6 +2,151 @@
 
 ---
 
+## v8.0.0-alpha.3 — Domain Plugins + Artifact System (Phase 3) (2026-04-16)
+
+### Summary
+
+Makes the agent team genuinely general-purpose. Introduces a domain plugin system (coding, writing, research, data, general) and a typed artifact system that tracks all pipeline outputs as structured objects instead of raw text.
+
+### Domain Plugin System (`domains/`)
+
+- `DomainPlugin` ABC: `detect()`, `get_executor_prompt()`, `get_reviewer_prompt()`, `parse_output()`, `validate()`
+- 5 built-in plugins:
+  - **CodingPlugin** — wraps existing `--- FILE ---` extraction, code review prompts
+  - **WritingPlugin** — documents, reports, emails with `--- DOCUMENT ---` blocks
+  - **ResearchPlugin** — structured analysis with citations, web search integration
+  - **DataPlugin** — SQL queries, data analysis, markdown tables
+  - **GeneralPlugin** — catch-all fallback
+- `DomainRegistry` — auto-detects best plugin via keyword scoring; supports custom plugins
+- `get_domain_for_task()` — convenience function with forced-domain override
+
+### Artifact System (`artifacts/`)
+
+- `Artifact` dataclass: type, content, metadata, file_path, language, title, status
+- `ArtifactType` enum: CODE_FILE, DOCUMENT, QUERY, ANALYSIS, COMMAND, DATA, GENERIC
+- `ArtifactStore` — in-memory per-session tracker with type/producer filtering
+- `renderer.py` — materializes code artifacts to disk, produces human-readable summaries
+
+### Integration
+
+- Task graph router injects domain-specific executor/reviewer prompts into graph nodes
+- Runner parses executor output via `domain_plugin.parse_output()` → `ArtifactStore`
+- Domain validation runs automatically; issues reported as status events
+- Code artifacts written to disk via renderer (replaces direct `_write_executor_files`)
+- Artifact summaries emitted as status events for CLI display
+
+### Files Changed
+
+| New (12 files) | Modified |
+|---|---|
+| `domains/__init__.py` | `agents/runner.py` |
+| `domains/base.py` | `agents/router.py` |
+| `domains/coding.py` | |
+| `domains/writing.py` | |
+| `domains/research.py` | |
+| `domains/data.py` | |
+| `domains/general.py` | |
+| `domains/registry.py` | |
+| `artifacts/__init__.py` | |
+| `artifacts/types.py` | |
+| `artifacts/store.py` | |
+| `artifacts/renderer.py` | |
+| `tests/test_domains.py` (25 tests) | |
+
+---
+
+## v8.0.0-alpha.2 — Task Graph + Domain Classification (Phase 2) (2026-04-16)
+
+### Summary
+
+Introduces a DAG-based task graph executor that replaces the fixed phase-order pipeline. Tasks are now classified by both complexity AND domain (coding/writing/research/data/general). The static router produces graphs structurally identical to the old pipeline, ensuring zero behavior change while enabling future dynamic routing.
+
+### Task Graph Engine (`agents/task_graph.py`)
+
+- `TaskGraph` — DAG with dependency tracking, cycle detection, cascade-skip on failure
+- `TaskNode` — individual agent invocation with config, deps, status, and optional flag
+- `GraphExecutor` — runs the DAG respecting dependencies, parallelizes independent nodes via `asyncio.gather()`
+- Synthesis nodes combine multi-agent outputs (replaces inline `_synthesize_stage()` calls)
+
+### Task Router (`agents/router.py`)
+
+- `TaskRouter.route()` — converts `TaskClassification` + mode into a `TaskGraph`
+- Static mode (default) produces graphs identical to SIMPLE/MEDIUM/COMPLEX phase orders
+- `USE_TASK_GRAPH` config flag (default `True`) — set `False` for legacy fallback
+- `DYNAMIC_ROUTING` config flag (default `False`) — placeholder for LLM-assisted routing
+
+### Enhanced Classification (`agents/complexity.py`)
+
+- `TaskClassification` dataclass: complexity + domain + key_entities + needs_tools + mode_hint
+- `classify_task()` — enhanced version of `classify_complexity()` with domain detection
+- Domain keyword patterns: `_CODING_KW`, `_WRITING_KW`, `_RESEARCH_KW`, `_DATA_KW`, `_TOOL_KW`
+- Backward-compatible: `classify_task().complexity` matches `classify_complexity()` for same input
+
+### Runner Integration
+
+- `run()` now uses `TaskRouter` + `GraphExecutor` when `USE_TASK_GRAPH=True`
+- Legacy pipeline extracted to `_run_legacy_pipeline()` as fallback
+- Status messages show domain classification: "Task: MEDIUM / domain: coding"
+
+### Files Changed
+
+| New | Modified |
+|---|---|
+| `agents/task_graph.py` | `agents/runner.py` |
+| `agents/router.py` | `agents/complexity.py` |
+| `tests/test_task_graph.py` (26 tests) | `config.py` |
+
+---
+
+## v8.0.0-alpha.1 — EventEmitter Decoupling (Phase 1) (2026-04-16)
+
+### Summary
+
+Foundation phase of the v8.0 general-purpose architecture refactoring. Introduces an `EventEmitter` protocol that decouples the agent pipeline from WebSocket transport. Eliminates 388 lines of duplicated code in `http_runner.py`. No user-visible behavior changes.
+
+### EventEmitter Abstraction
+
+- **New module**: `events.py` — `EventEmitter` protocol with 3 implementations:
+  - `WebSocketEmitter`: wraps WebSocket + asyncio.Lock for parallel-safe sends (replaces `_LockedWebSocket`)
+  - `CallbackEmitter`: collects events for HTTP API, testing, and headless execution
+  - `NullEmitter`: discards all events for batch/headless mode
+- **Event type constants**: 12 typed constants (`EVT_STATUS`, `EVT_TOKEN`, etc.)
+
+### WebSocket Decoupling
+
+- `AgentTeam.__init__` now accepts `EventEmitter` instead of `WebSocket`
+- `LLMProvider.stream()` signature: `ws: WebSocket` replaced with `emitter: EventEmitter`
+- All 4 provider implementations updated (Ollama, OpenAI-compat, Anthropic, HuggingFace)
+- `stream_llm()` registry function updated to pass `emitter`
+- `_LockedWebSocket` removed from runner.py, replaced by `_EmitterCompat` shim
+
+### http_runner Elimination
+
+- `http_runner.py` deprecated (388 lines of duplicated pipeline logic)
+- `/ask` endpoint rewritten to use `AgentTeam` + `CallbackEmitter`
+- Request/response models moved to `server/models.py`
+
+### Test Harness
+
+- `tests/mocks.py`: `MockLLMProvider` for headless pipeline testing
+- `tests/test_event_emitter.py`: 13 tests covering all 3 emitter implementations
+- All 69 existing tests pass with zero changes
+
+### Files Changed
+
+| New | Modified | Deprecated |
+|---|---|---|
+| `events.py` | `agents/runner.py` | `agents/http_runner.py` |
+| `server/models.py` | `llm/base.py` | |
+| `tests/mocks.py` | `llm/registry.py` | |
+| `tests/test_event_emitter.py` | `llm/ollama_provider.py` | |
+| | `llm/openai_compat.py` | |
+| | `llm/providers.py` | |
+| | `llm/huggingface_provider.py` | |
+| | `server/app.py` | |
+
+---
+
 ## v7.4.0 — Web Search + User-Feedback Self-Learning (2026-04-15)
 
 ### Summary

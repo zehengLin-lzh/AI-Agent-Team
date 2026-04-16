@@ -1,11 +1,30 @@
 """LLM provider registry — switch between Ollama, HuggingFace, OpenAI, Anthropic, etc."""
-from fastapi import WebSocket
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from agent_team.llm.base import LLMProvider, SessionTokenTracker
 
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
+
 # Lazy-initialized providers
 _providers: dict[str, LLMProvider] = {}
-_active_provider: str = "ollama"
+def _detect_default_provider() -> str:
+    """Auto-detect best provider: prefer OpenRouter if key is set, else Ollama."""
+    import os
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    # Also check .env file (keys may not be in env yet at import time)
+    try:
+        from agent_team.llm.keys import has_key
+        if has_key("openrouter"):
+            return "openrouter"
+    except Exception:
+        pass
+    return "ollama"
+
+_active_provider: str = _detect_default_provider()
 
 
 def _ensure_providers():
@@ -79,19 +98,23 @@ def set_active_model(model: str) -> None:
 async def stream_llm(
     system_prompt: str,
     messages: list[dict],
-    ws: WebSocket,
+    emitter: EventEmitter,
     agent_name: str,
     agent_color: str = "#ffffff",
     temperature: float = 0.3,
     token_tracker: SessionTokenTracker | None = None,
     display_name: str = "",
     model_override: str | None = None,
+    # Legacy alias — callers using ws= keyword will still work
+    ws: object | None = None,
 ) -> str:
     """Stream via the active provider."""
+    # Support legacy ws= keyword for backward compat during migration
+    target = emitter if emitter is not None else ws
     return await get_provider().stream(
         system_prompt=system_prompt,
         messages=messages,
-        ws=ws,
+        emitter=target,
         agent_name=agent_name,
         agent_color=agent_color,
         temperature=temperature,

@@ -14,11 +14,16 @@ Popular open-source models:
   - bigcode/starcoder2-15b
   - codellama/CodeLlama-13b-Instruct-hf
 """
+from __future__ import annotations
+
 import json
 import os
 import time
 import httpx
-from fastapi import WebSocket
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
 
@@ -156,7 +161,7 @@ class HuggingFaceProvider(LLMProvider):
         self,
         system_prompt: str,
         messages: list[dict],
-        ws: WebSocket,
+        emitter: EventEmitter,
         agent_name: str,
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
@@ -178,7 +183,6 @@ class HuggingFaceProvider(LLMProvider):
         }
 
         start_msg: dict = {
-            "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
@@ -186,7 +190,7 @@ class HuggingFaceProvider(LLMProvider):
         }
         if display_name:
             start_msg["display_name"] = display_name
-        await ws.send_json(start_msg)
+        await emitter.emit("agent_start", start_msg)
 
         agent_stats = TokenStats()
         start_time = time.monotonic_ns()
@@ -200,12 +204,11 @@ class HuggingFaceProvider(LLMProvider):
                 if response.status_code != 200:
                     body = await response.aread()
                     error_msg = body.decode("utf-8", errors="replace")[:500]
-                    await ws.send_json({
-                        "type": "error",
+                    await emitter.emit("error", {
                         "agent": agent_name,
                         "content": f"HuggingFace API error ({response.status_code}): {error_msg}",
                     })
-                    await ws.send_json({"type": "agent_done", "agent": agent_name, "token_stats": {}})
+                    await emitter.emit("agent_done", {"agent": agent_name, "token_stats": {}})
                     return ""
 
                 async for line in response.aiter_lines():
@@ -222,8 +225,7 @@ class HuggingFaceProvider(LLMProvider):
                             token = delta.get("content", "")
                             if token:
                                 full_response += token
-                                await ws.send_json({
-                                    "type": "token",
+                                await emitter.emit("token", {
                                     "agent": agent_name,
                                     "content": token,
                                 })
@@ -238,8 +240,7 @@ class HuggingFaceProvider(LLMProvider):
                         continue
 
         except Exception as e:
-            await ws.send_json({
-                "type": "error",
+            await emitter.emit("error", {
                 "agent": agent_name,
                 "content": f"HuggingFace error: {str(e)}",
             })
@@ -255,8 +256,7 @@ class HuggingFaceProvider(LLMProvider):
         if token_tracker:
             token_tracker.record(agent_name, agent_stats)
 
-        await ws.send_json({
-            "type": "agent_done",
+        await emitter.emit("agent_done", {
             "agent": agent_name,
             "token_stats": {
                 "prompt_tokens": agent_stats.prompt_tokens,

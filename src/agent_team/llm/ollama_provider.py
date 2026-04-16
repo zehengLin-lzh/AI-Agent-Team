@@ -1,7 +1,12 @@
 """Ollama LLM provider."""
+from __future__ import annotations
+
 import json
 import httpx
-from fastapi import WebSocket
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 from agent_team.config import OLLAMA_URL, OLLAMA_BASE_URL, MODEL
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
@@ -78,7 +83,7 @@ class OllamaProvider(LLMProvider):
         self,
         system_prompt: str,
         messages: list[dict],
-        ws: WebSocket,
+        emitter: EventEmitter,
         agent_name: str,
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
@@ -105,7 +110,6 @@ class OllamaProvider(LLMProvider):
             },
         }
         start_msg: dict = {
-            "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
@@ -113,7 +117,7 @@ class OllamaProvider(LLMProvider):
         }
         if display_name:
             start_msg["display_name"] = display_name
-        await ws.send_json(start_msg)
+        await emitter.emit("agent_start", start_msg)
         agent_stats = TokenStats()
         try:
             client = await _get_client()
@@ -133,8 +137,7 @@ class OllamaProvider(LLMProvider):
                         token = chunk.get("message", {}).get("content", "")
                         if token:
                             full_response += token
-                            await ws.send_json({
-                                "type": "token",
+                            await emitter.emit("token", {
                                 "agent": agent_name,
                                 "content": token,
                             })
@@ -147,8 +150,7 @@ class OllamaProvider(LLMProvider):
                         continue
         except Exception as e:
             error_msg = f"Ollama error: {str(e)}. Is Ollama running? Try: ollama serve"
-            await ws.send_json({
-                "type": "error",
+            await emitter.emit("error", {
                 "agent": agent_name,
                 "content": error_msg,
             })
@@ -157,8 +159,7 @@ class OllamaProvider(LLMProvider):
         if token_tracker:
             token_tracker.record(agent_name, agent_stats)
 
-        await ws.send_json({
-            "type": "agent_done",
+        await emitter.emit("agent_done", {
             "agent": agent_name,
             "token_stats": {
                 "prompt_tokens": agent_stats.prompt_tokens,

@@ -5,10 +5,15 @@ Mistral, Groq, DeepSeek, Together, Cohere) use the OpenAI chat
 completions format. This base class handles the common streaming
 and non-streaming logic.
 """
+from __future__ import annotations
+
 import json
 import time
 import httpx
-from fastapi import WebSocket
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_team.events import EventEmitter
 
 from agent_team.llm.base import LLMProvider, TokenStats, SessionTokenTracker
 from agent_team.llm.keys import get_key, has_key, PROVIDER_KEY_URLS
@@ -93,7 +98,7 @@ class OpenAICompatProvider(LLMProvider):
         self,
         system_prompt: str,
         messages: list[dict],
-        ws: WebSocket,
+        emitter: EventEmitter,
         agent_name: str,
         agent_color: str = "#ffffff",
         temperature: float = 0.3,
@@ -121,7 +126,6 @@ class OpenAICompatProvider(LLMProvider):
         }
 
         start_msg: dict = {
-            "type": "agent_start",
             "agent": agent_name,
             "color": agent_color,
             "model": model,
@@ -129,15 +133,14 @@ class OpenAICompatProvider(LLMProvider):
         }
         if display_name:
             start_msg["display_name"] = display_name
-        await ws.send_json(start_msg)
+        await emitter.emit("agent_start", start_msg)
 
         agent_stats = TokenStats()
         start_time = time.monotonic_ns()
 
         try:
             if not has_key(self.key_provider):
-                await ws.send_json({
-                    "type": "error",
+                await emitter.emit("error", {
                     "agent": agent_name,
                     "content": (
                         f"No API key for {self.name}. "
@@ -145,23 +148,39 @@ class OpenAICompatProvider(LLMProvider):
                         f"or get one at: {PROVIDER_KEY_URLS.get(self.key_provider, '')}"
                     ),
                 })
-                await ws.send_json({"type": "agent_done", "agent": agent_name, "token_stats": {}})
+                await emitter.emit("agent_done", {"agent": agent_name, "token_stats": {}})
                 return ""
 
             client = await _get_client(self.name)
             url = self._get_chat_url()
             headers = self._get_headers()
 
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
+            # Retry loop for rate limits (429) and transient errors (503)
+            import asyncio as _asyncio
+            _max_retries = 3
+            for _attempt in range(_max_retries + 1):
+                _resp = client.stream("POST", url, json=payload, headers=headers)
+                response = await _resp.__aenter__()
+                if response.status_code in (429, 503) and _attempt < _max_retries:
+                    await response.aclose()
+                    wait = 2 ** _attempt + 1  # 2s, 3s, 5s
+                    await emitter.emit("status", {
+                        "message": f"Rate limited, retrying in {wait}s... ({_attempt+1}/{_max_retries})",
+                        "phase": "retry",
+                    })
+                    await _asyncio.sleep(wait)
+                    continue
+                break
+
+            try:
                 if response.status_code != 200:
                     body = await response.aread()
                     error_msg = body.decode("utf-8", errors="replace")[:500]
-                    await ws.send_json({
-                        "type": "error",
+                    await emitter.emit("error", {
                         "agent": agent_name,
                         "content": f"{self.name} API error ({response.status_code}): {error_msg}",
                     })
-                    await ws.send_json({"type": "agent_done", "agent": agent_name, "token_stats": {}})
+                    await emitter.emit("agent_done", {"agent": agent_name, "token_stats": {}})
                     return ""
 
                 async for line in response.aiter_lines():
@@ -178,8 +197,7 @@ class OpenAICompatProvider(LLMProvider):
                             token = delta.get("content", "")
                             if token:
                                 full_response += token
-                                await ws.send_json({
-                                    "type": "token",
+                                await emitter.emit("token", {
                                     "agent": agent_name,
                                     "content": token,
                                 })
@@ -190,10 +208,11 @@ class OpenAICompatProvider(LLMProvider):
                             agent_stats.total_tokens = usage.get("total_tokens", 0)
                     except json.JSONDecodeError:
                         continue
+            finally:
+                await response.aclose()
 
         except Exception as e:
-            await ws.send_json({
-                "type": "error",
+            await emitter.emit("error", {
                 "agent": agent_name,
                 "content": f"{self.name} error: {str(e)}",
             })
@@ -207,8 +226,7 @@ class OpenAICompatProvider(LLMProvider):
         if token_tracker:
             token_tracker.record(agent_name, agent_stats)
 
-        await ws.send_json({
-            "type": "agent_done",
+        await emitter.emit("agent_done", {
             "agent": agent_name,
             "token_stats": {
                 "prompt_tokens": agent_stats.prompt_tokens,

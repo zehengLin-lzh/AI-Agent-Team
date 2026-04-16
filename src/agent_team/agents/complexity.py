@@ -1,5 +1,6 @@
-"""Task complexity classification for adaptive pipeline routing."""
+"""Task complexity classification and domain detection for adaptive pipeline routing."""
 import re
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -7,6 +8,16 @@ class TaskComplexity(str, Enum):
     SIMPLE = "simple"
     MEDIUM = "medium"
     COMPLEX = "complex"
+
+
+@dataclass
+class TaskClassification:
+    """Rich classification result with complexity, domain, and metadata."""
+    complexity: TaskComplexity
+    domain: str = "general"      # coding, writing, research, data, general
+    key_entities: list[str] = field(default_factory=list)
+    needs_tools: bool = False    # whether MCP tools are likely needed
+    mode_hint: str = ""          # suggested AgentMode if detectable
 
 
 # Signals that suggest a simple, single-focus task
@@ -87,3 +98,105 @@ def classify_complexity(user_plan: str, mode: str = "coding") -> TaskComplexity:
 
     # Default
     return TaskComplexity.MEDIUM
+
+
+# ── Domain detection keywords ──────────────────────────────────────────────
+
+_CODING_KW = re.compile(
+    r"\b(code|implement|function|class|bug|fix|refactor|test|api|endpoint|"
+    r"import|library|package|deploy|compile|build|debug|git|commit|"
+    r"python|javascript|typescript|rust|go|java|html|css|sql|"
+    r"server|client|frontend|backend|fullstack|database|schema)\b",
+    re.IGNORECASE,
+)
+
+_WRITING_KW = re.compile(
+    r"\b(write|draft|compose|essay|report|article|blog|email|letter|"
+    r"document|summary|summarize|memo|proposal|outline|paragraph|"
+    r"copy|content|proofread|edit text|rewrite|tone|narrative)\b",
+    re.IGNORECASE,
+)
+
+_RESEARCH_KW = re.compile(
+    r"\b(research|find|search|compare|alternatives|pros and cons|"
+    r"investigate|analyze data|market analysis|competitive|benchmark|"
+    r"survey|literature|papers|sources|citations|evidence|study)\b",
+    re.IGNORECASE,
+)
+
+_DATA_KW = re.compile(
+    r"\b(query|select|insert|update|delete|table|column|row|csv|excel|"
+    r"spreadsheet|dashboard|chart|graph|visualization|statistics|"
+    r"aggregate|average|count|sum|join|group by|order by|"
+    r"patient|record|transaction|inventory|sales|revenue)\b",
+    re.IGNORECASE,
+)
+
+_TOOL_KW = re.compile(
+    r"\b(database|db|sql|file|filesystem|web search|search the web|"
+    r"look up|browse|fetch|api call|http|curl|download)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_task(user_plan: str, mode: str = "coding") -> TaskClassification:
+    """Enhanced classification returning complexity + domain + metadata.
+
+    No LLM call — uses heuristics for instant classification.
+    Backward-compatible: complexity result matches classify_complexity().
+    """
+    complexity = classify_complexity(user_plan, mode)
+
+    # Domain scoring
+    coding_hits = len(_CODING_KW.findall(user_plan))
+    writing_hits = len(_WRITING_KW.findall(user_plan))
+    research_hits = len(_RESEARCH_KW.findall(user_plan))
+    data_hits = len(_DATA_KW.findall(user_plan))
+
+    scores = {
+        "coding": coding_hits,
+        "writing": writing_hits,
+        "research": research_hits,
+        "data": data_hits,
+    }
+
+    # If a mode is explicitly specified, heavily weight that domain
+    mode_domain_map = {
+        "coding": "coding",
+        "execution": "coding",
+        "architecture": "coding",
+        "thinking": "general",
+        "brainstorming": "general",
+    }
+    if mode in mode_domain_map and mode_domain_map[mode] in scores:
+        scores[mode_domain_map[mode]] += 10
+
+    # Pick highest scoring domain, default to "general"
+    best_domain = max(scores, key=scores.get)
+    if scores[best_domain] == 0:
+        best_domain = "general"
+
+    # Tool detection
+    needs_tools = bool(_TOOL_KW.search(user_plan))
+
+    # Extract key entities (simple: unique capitalized words and file refs)
+    entities = list(set(_FILE_REFS.findall(user_plan)))[:10]
+
+    # Mode hint
+    mode_hint = ""
+    if best_domain == "coding":
+        mode_hint = "coding"
+    elif best_domain == "writing":
+        mode_hint = "thinking"
+    elif best_domain == "research":
+        mode_hint = "thinking"
+    elif best_domain == "data":
+        mode_hint = "execution"
+
+    return TaskClassification(
+        complexity=complexity,
+        domain=best_domain,
+        key_entities=entities,
+        needs_tools=needs_tools,
+        mode_hint=mode_hint,
+    )

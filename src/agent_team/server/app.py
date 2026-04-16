@@ -11,13 +11,12 @@ from fastapi.responses import FileResponse
 
 from agent_team.config import REPO_ROOT
 from agent_team.agents.runner import AgentTeam
+from agent_team.events import WebSocketEmitter, CallbackEmitter
 from agent_team.llm import get_active_model, set_active_model
 from agent_team.llm.registry import (
     get_provider, set_provider, get_active_provider_name, list_providers,
 )
-from agent_team.agents.http_runner import (
-    AskMode, AskRequest, AskResponse, run_team_http,
-)
+from agent_team.server.models import AskMode, AskRequest, AskResponse
 from agent_team.agents.definitions import AgentMode
 from agent_team.plans.storage import save_plan_markdown
 from agent_team.security.validator import validate_plan_input, ValidationError
@@ -45,12 +44,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 plan_content = validate_plan_input(data.get("content", ""))
                 data["content"] = plan_content
             except ValidationError as ve:
-                await websocket.send_json({"type": "error", "content": str(ve)})
+                await websocket.send_json({"type": "error", "content": str(ve)})  # pre-emitter
                 await websocket.close()
                 return
 
+            emitter = WebSocketEmitter(websocket)
             team = AgentTeam(
-                websocket,
+                emitter,
                 execution_path=data.get("execution_path"),
                 plan_only=data.get("plan_only", False),
                 reuse_plan=data.get("reuse_plan", False),
@@ -71,15 +71,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 if tools_prompt:
                     team.mcp_tools_prompt = tools_prompt
                     team.mcp_registry = mcp_reg
-                    await websocket.send_json({
-                        "type": "status",
+                    await emitter.emit("status", {
                         "phase": "mcp",
                         "message": f"MCP: {len(mcp_reg.get_all_tools())} tools loaded",
                     })
             except Exception as exc:
                 import traceback
-                await websocket.send_json({
-                    "type": "status",
+                await emitter.emit("status", {
                     "phase": "mcp",
                     "message": f"MCP setup skipped: {exc}",
                 })
@@ -117,10 +115,28 @@ async def ask(request: AskRequest):
         user_plan_with_context = f"{user_plan}\n\nExecution context:\n- Mode: {mode.value}"
 
     try:
-        phase_outputs = await run_team_http(
-            user_plan_with_context, mode,
-            agent_mode=agent_mode, execution_path=execution_path,
+        # Use AgentTeam with CallbackEmitter — no WebSocket needed
+        emitter = CallbackEmitter()
+        team = AgentTeam(
+            emitter,
+            execution_path=execution_path,
+            plan_only=(mode == AskMode.PLAN_ONLY),
         )
+
+        # Inject MCP tools if available
+        try:
+            from agent_team.mcp.registry import MCPRegistry
+            mcp_reg = MCPRegistry()
+            await mcp_reg.connect_all()
+            tools_prompt = mcp_reg.format_tools_prompt()
+            if tools_prompt:
+                team.mcp_tools_prompt = tools_prompt
+                team.mcp_registry = mcp_reg
+        except Exception:
+            pass
+
+        await team.run(user_plan_with_context, mode=agent_mode.value)
+        phase_outputs = dict(team.phase_outputs)
     except Exception as e:
         print(f"[/ask] Pipeline error: {e}")
         _tb.print_exc()
@@ -135,8 +151,11 @@ async def ask(request: AskRequest):
         execution_path=execution_path, mode=agent_mode.value,
     )
 
-    # Extract file_changes from phase_outputs (stored by run_team_http as list[dict])
-    file_changes = phase_outputs.pop("_file_changes", None)  # type: ignore[arg-type]
+    # Extract file_changes from emitter events
+    file_changes = None
+    for evt_type, evt_data in emitter.events:
+        if evt_type == "file_changes":
+            file_changes = evt_data.get("changes")
 
     return AskResponse(
         title=title,
