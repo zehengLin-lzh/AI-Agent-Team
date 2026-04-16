@@ -566,14 +566,31 @@ class AgentTeam:
                 pass
 
     def _get_model_for_agent(self, agent_name: str) -> str | None:
-        """Resolve the routed model name for an agent without mutating global state."""
+        """Resolve the routed model name for an agent without mutating global state.
+
+        Uses the current provider's model names from PROVIDER_MODELS if available,
+        falling back to the import-time routing tables.
+        """
+        from agent_team.config import PROVIDER_MODELS
+        from agent_team.llm.registry import get_active_provider_name
+
+        # Resolve tier for this agent
+        spec = AGENT_REGISTRY_MAP.get(agent_name)
+        tier = spec.model_tier if spec else "fast"
+        # Map tier to model for the current provider
+        provider_name = get_active_provider_name()
+        provider_models = PROVIDER_MODELS.get(provider_name)
+        if provider_models:
+            tier_map = {"fast": "fast", "reasoning": "reasoning", "coding": "reasoning"}
+            return provider_models.get(tier_map.get(tier, "fast"), provider_models.get("fast"))
+
+        # Fallback to import-time routing tables
         if self.complexity == TaskComplexity.SIMPLE:
             model = SIMPLE_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
         elif self.complexity == TaskComplexity.MEDIUM:
             model = MEDIUM_MODEL_ROUTING.get(agent_name) or MODEL_ROUTING.get(agent_name)
         else:
             model = MODEL_ROUTING.get(agent_name)
-        # Apply fallback overrides for models not available locally
         if model and model in self._model_overrides:
             return self._model_overrides[model]
         return model
