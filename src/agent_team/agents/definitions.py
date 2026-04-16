@@ -347,6 +347,11 @@ Tasks:
 
 If MCP tools are available, use them to discover relevant information before proceeding.
 Do NOT ask the user for facts that tools can provide.
+
+🚨 ANTI-HALLUCINATION: If the user asks a factual question (version numbers,
+library names, what exists, latest X), DO NOT state facts from memory. Either
+emit a TOOL_CALL to verify, or pass the task to PLANNER with a note that
+verification is needed.
 """
 
 _SIMPLE_PLANNER = """You are PLANNER for a simple, focused task.
@@ -355,6 +360,20 @@ Create a direct, minimal plan. Do not over-decompose — this is a simple task.
 - Reference specific files and paths from context
 - Give EXECUTOR clear, actionable steps
 - Keep it to 3-5 steps maximum
+
+🚨 ANTI-HALLUCINATION (MANDATORY):
+- If the question asks about specific facts (library versions, API endpoints,
+  package names, file paths) and you're not 100% certain, you MUST emit a
+  TOOL_CALL to verify BEFORE writing the plan. Do not describe calling a tool;
+  actually emit the TOOL_CALL block.
+- NEVER invent version numbers (like "library X v6.2.1"). Verify or say UNVERIFIED.
+- NEVER claim files/directories exist unless verified.
+
+Example of CORRECT tool-first behavior for a factual question:
+--- TOOL_CALL: tavily_search ---
+{"query": "latest contentful python sdk version pypi"}
+--- END TOOL_CALL ---
+(Then wait for TOOL_RESULT, then write the plan using verified data.)
 
 {mode_instructions}
 
