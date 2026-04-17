@@ -60,7 +60,7 @@ class AnthropicProvider(OpenAICompatProvider):
     ]
 
     def _get_headers(self) -> dict:
-        key = get_key(self.key_provider)
+        key = self._resolve_key()
         return {
             "Content-Type": "application/json",
             "x-api-key": key or "",
@@ -93,9 +93,10 @@ class AnthropicProvider(OpenAICompatProvider):
                 "content": msg.get("content", ""),
             })
 
+        from agent_team.llm.prompt_cache import build_anthropic_system
         payload = {
             "model": model,
-            "system": system_prompt,
+            "system": build_anthropic_system(system_prompt),
             "messages": chat_messages,
             "max_tokens": self.max_tokens,
             "temperature": temperature,
@@ -174,6 +175,12 @@ class AnthropicProvider(OpenAICompatProvider):
                             usage = msg.get("usage", {})
                             if usage:
                                 agent_stats.prompt_tokens = usage.get("input_tokens", 0)
+                                agent_stats.cache_read_tokens = usage.get(
+                                    "cache_read_input_tokens", 0
+                                )
+                                agent_stats.cache_write_tokens = usage.get(
+                                    "cache_creation_input_tokens", 0
+                                )
 
                     except json.JSONDecodeError:
                         continue
@@ -217,9 +224,10 @@ class AnthropicProvider(OpenAICompatProvider):
                 "content": msg.get("content", ""),
             })
 
+        from agent_team.llm.prompt_cache import build_anthropic_system
         payload = {
             "model": model,
-            "system": system_prompt,
+            "system": build_anthropic_system(system_prompt),
             "messages": chat_messages,
             "max_tokens": self.max_tokens,
             "temperature": temperature,

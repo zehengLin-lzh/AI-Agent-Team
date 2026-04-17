@@ -16,6 +16,8 @@ class TokenStats:
     completion_tokens: int = 0
     total_tokens: int = 0
     eval_duration_ns: int = 0  # nanoseconds
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def tokens_per_second(self) -> float:

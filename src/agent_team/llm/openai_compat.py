@@ -52,9 +52,31 @@ class OpenAICompatProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         return self.models
 
+    def _resolve_key(self) -> str | None:
+        """Return the API key, consulting the credential pool when eligible.
+
+        For providers in INDUSTRIALIZED_PROVIDERS, the pool performs
+        round-robin across ``PROVIDER_API_KEY``, ``PROVIDER_API_KEY_2``, ...
+        and skips keys currently cooling down. Falls back to ``get_key`` for
+        single-key providers.
+        """
+        try:
+            from agent_team.llm.registry import INDUSTRIALIZED_PROVIDERS
+            if self.key_provider in INDUSTRIALIZED_PROVIDERS:
+                from agent_team.llm.credential_pool import get_pool
+                pool = get_pool(self.key_provider)
+                pool.refresh()
+                if pool.size() > 1:
+                    pooled = pool.get_key()
+                    if pooled:
+                        return pooled
+        except Exception:
+            pass
+        return get_key(self.key_provider)
+
     def _get_headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
-        key = get_key(self.key_provider)
+        key = self._resolve_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
         return headers

@@ -59,13 +59,31 @@ def load_skill(skill_path: Path) -> Skill | None:
         return None
 
 
-def load_skills_from_dir(skills_dir: Path) -> list[Skill]:
-    """Load all skills from a directory (recursively finds SKILL.md files)."""
+def load_skills_from_dir(
+    skills_dir: Path,
+    *,
+    exclude_subdirs: list[str] | None = None,
+) -> list[Skill]:
+    """Load all skills from a directory (recursively finds SKILL.md files).
+
+    ``exclude_subdirs`` skips any path that passes through one of the named
+    subdirectories (e.g. ``["pending"]`` to avoid loading unapproved
+    candidates).
+    """
     skills = []
     if not skills_dir.exists():
         return skills
 
+    excluded = {name.strip("/") for name in (exclude_subdirs or [])}
+
     for skill_file in skills_dir.rglob('SKILL.md'):
+        if excluded:
+            try:
+                rel_parts = skill_file.relative_to(skills_dir).parts
+            except ValueError:
+                rel_parts = skill_file.parts
+            if any(part in excluded for part in rel_parts):
+                continue
         skill = load_skill(skill_file)
         if skill:
             skills.append(skill)

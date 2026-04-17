@@ -24,7 +24,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError as WsConnectionClosedError
 
 
-app = typer.Typer(help="Agent Team v7.0 CLI — self-learning AI agent team")
+app = typer.Typer(help="Agent Team v8.0 CLI — self-learning AI agent team")
 
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 

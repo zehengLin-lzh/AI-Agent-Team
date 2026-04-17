@@ -21,7 +21,7 @@ from agent_team.agents.definitions import AgentMode
 from agent_team.plans.storage import save_plan_markdown
 from agent_team.security.validator import validate_plan_input, ValidationError
 
-app = FastAPI(title="Mat Agent Team v7.0")
+app = FastAPI(title="Mat Agent Team v8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -1,12 +1,22 @@
 """LLM provider registry — switch between Ollama, HuggingFace, OpenAI, Anthropic, etc."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from agent_team.llm.base import LLMProvider, SessionTokenTracker
+from agent_team.llm.rate_tracker import get_tracker
 
 if TYPE_CHECKING:
     from agent_team.events import EventEmitter
+
+logger = logging.getLogger(__name__)
+
+# Providers covered by C2 Provider Industrialization (pre-call throttling,
+# credential rotation, prompt caching, pricing). Other providers continue to
+# use the unwrapped path.
+INDUSTRIALIZED_PROVIDERS = frozenset({"anthropic", "openai", "openrouter"})
 
 # Lazy-initialized providers
 _providers: dict[str, LLMProvider] = {}
@@ -116,6 +126,19 @@ def set_active_model(model: str) -> None:
     get_provider().set_active_model(model)
 
 
+async def _wait_if_throttled(provider_name: str) -> None:
+    """Pre-call throttle check; sleeps if provider is near its rate limit."""
+    if provider_name not in INDUSTRIALIZED_PROVIDERS:
+        return
+    tracker = get_tracker(provider_name)
+    need_wait, wait_s = tracker.should_throttle()
+    if need_wait and wait_s > 0:
+        logger.info(
+            "rate_tracker: %s near limit, sleeping %.1fs", provider_name, wait_s,
+        )
+        await asyncio.sleep(min(wait_s, 30.0))  # cap sleep to keep UX sane
+
+
 async def stream_llm(
     system_prompt: str,
     messages: list[dict],
@@ -132,7 +155,9 @@ async def stream_llm(
     """Stream via the active provider."""
     # Support legacy ws= keyword for backward compat during migration
     target = emitter if emitter is not None else ws
-    return await get_provider().stream(
+    provider = get_provider()
+    await _wait_if_throttled(provider.name)
+    result = await provider.stream(
         system_prompt=system_prompt,
         messages=messages,
         emitter=target,
@@ -143,6 +168,8 @@ async def stream_llm(
         display_name=display_name,
         model_override=model_override,
     )
+    _record_usage(provider.name, agent_name, token_tracker, model_override)
+    return result
 
 
 async def call_llm(
@@ -152,9 +179,41 @@ async def call_llm(
     model_override: str | None = None,
 ) -> str:
     """Non-streaming call via the active provider."""
-    return await get_provider().call(
+    provider = get_provider()
+    await _wait_if_throttled(provider.name)
+    return await provider.call(
         system_prompt=system_prompt,
         messages=messages,
         temperature=temperature,
         model_override=model_override,
     )
+
+
+def _record_usage(
+    provider_name: str,
+    agent_name: str,
+    token_tracker: SessionTokenTracker | None,
+    model_override: str | None,
+) -> None:
+    if provider_name not in INDUSTRIALIZED_PROVIDERS or token_tracker is None:
+        return
+    stats = token_tracker.agents.get(agent_name)
+    if stats is None:
+        return
+    total = stats.prompt_tokens + stats.completion_tokens
+    if total > 0:
+        get_tracker(provider_name).record(total)
+    try:
+        from agent_team.llm.pricing import current_session_usage
+        provider = _providers.get(provider_name)
+        model = model_override or (provider.get_active_model() if provider else "")
+        current_session_usage().record(
+            provider_name,
+            model,
+            prompt_tokens=stats.prompt_tokens,
+            completion_tokens=stats.completion_tokens,
+            cache_read_tokens=getattr(stats, "cache_read_tokens", 0),
+            cache_write_tokens=getattr(stats, "cache_write_tokens", 0),
+        )
+    except Exception as e:  # pragma: no cover — never break the request path
+        logger.debug("pricing.record failed: %s", e)

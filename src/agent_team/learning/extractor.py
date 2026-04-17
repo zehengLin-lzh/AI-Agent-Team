@@ -1,10 +1,19 @@
 """Knowledge extraction from completed sessions."""
+import logging
+import uuid
+
 from agent_team.memory.database import MemoryDB
 from agent_team.memory.embeddings import get_embedding
 from agent_team.memory.indexer import index_session
 from agent_team.memory.types import LearnedPattern
 from agent_team.llm import call_llm
-import uuid
+
+logger = logging.getLogger(__name__)
+
+# Patterns with confidence at or above this threshold are eligible to be
+# proposed as reusable skills. The candidate still requires manual approval
+# via `/skills review` — see skills/registry.py::approve_pending.
+PROMOTION_CONFIDENCE_THRESHOLD = 0.7
 
 
 SUMMARY_PROMPT = """You are a knowledge extraction agent. Analyze this session transcript and produce:
@@ -152,7 +161,46 @@ async def extract_error_patterns(
     except Exception:
         pass  # Best-effort
 
+    await _maybe_stage_candidates(stored)
     return stored
+
+
+async def _maybe_stage_candidates(patterns: list[LearnedPattern]) -> int:
+    """Stage high-confidence patterns as skill candidates in skills/pending/.
+
+    Conservative policy: only generates candidates for manual review via
+    `/skills review`. Existing approved/pending skills with the same name are
+    skipped. Returns the number of candidates written.
+    """
+    eligible = [p for p in patterns if p.confidence >= PROMOTION_CONFIDENCE_THRESHOLD]
+    if not eligible:
+        return 0
+
+    try:
+        from agent_team.skills.promoter import promote_pattern_to_skill
+        from agent_team.skills.registry import SkillRegistry
+    except ImportError:
+        return 0
+
+    try:
+        registry = SkillRegistry()
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug(f"SkillRegistry unavailable, skipping promotion: {e}")
+        return 0
+
+    staged = 0
+    for pattern in eligible:
+        try:
+            candidate = await promote_pattern_to_skill(pattern)
+            if candidate is None:
+                continue
+            if registry.candidate_exists(candidate.name):
+                continue
+            registry.stage_candidate(candidate)
+            staged += 1
+        except Exception as e:  # pragma: no cover — best effort
+            logger.debug(f"Skill promotion failed for pattern {pattern.id}: {e}")
+    return staged
 
 
 async def extract_session_knowledge(
@@ -212,10 +260,27 @@ async def extract_session_knowledge(
     # End session with summary and quality
     db.end_session(session_id, summary=summary, quality_score=quality)
 
+    # Attempt skill promotion for high-quality sessions only — session quality
+    # gates whether we even consider staging candidates.
+    candidates_staged = 0
+    if quality >= PROMOTION_CONFIDENCE_THRESHOLD:
+        session_patterns = [
+            LearnedPattern(
+                id=str(uuid.uuid4()),
+                category=p['category'],
+                description=p['description'],
+                confidence=max(quality, PROMOTION_CONFIDENCE_THRESHOLD),
+                source_session_id=session_id,
+            )
+            for p in patterns
+        ] if patterns_stored else []
+        candidates_staged = await _maybe_stage_candidates(session_patterns)
+
     return {
         "session_id": session_id,
         "chunks_stored": chunks_stored,
         "patterns_stored": patterns_stored,
         "quality_score": quality,
         "summary": summary,
+        "skill_candidates_staged": candidates_staged,
     }

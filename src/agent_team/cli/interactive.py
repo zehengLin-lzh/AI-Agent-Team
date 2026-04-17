@@ -46,7 +46,7 @@ from agent_team.learning.feedback import detect_feedback, extract_and_store, MAX
 # ── Branding & Config ────────────────────────────────────────────────────────
 
 APP_NAME = "Mat Agent Team"
-APP_VERSION = "7.0.0"
+APP_VERSION = "8.0.0"
 BACKEND_URL = os.getenv("AGENT_TEAM_BACKEND_URL", "http://localhost:8000")
 HISTORY_FILE = Path.home() / ".agent_team_history"
 
@@ -390,10 +390,7 @@ def render_help():
         ("/tokens", "Show token usage for the current session"),
         ("/clear", "Clear the screen"),
         ("/history", "Show conversation history summary"),
-        ("/ask <question>", "Ask a single question (direct LLM call, no agents)"),
-        ("/chat", "Enter chat mode (direct LLM conversation, stateless)"),
-        ("/plan <task>", "Submit a task in plan-only mode (no execution)"),
-        ("/exec <task>", "Submit a task with execution enabled"),
+        ("(just type)", "Agent auto-routes: chat / question / task (with plan confirm)"),
         ("/mcp", "List MCP servers, tools, and status"),
         ("/mcp connect", "Connect to all configured MCP servers"),
         ("/mcp add <name>", "Add a new MCP server (interactive setup)"),
@@ -403,6 +400,11 @@ def render_help():
         ("/cd <path>", "Change working directory"),
         ("/pwd", "Show current working directory"),
         ("/skills", "List installed skills"),
+        ("/skills pending", "List candidate skills awaiting approval"),
+        ("/skills review", "Interactively approve/reject pending candidates"),
+        ("/skills show <name>", "Show full skill content"),
+        ("/skills approve|reject <name>", "Promote or discard a candidate"),
+        ("/skills delete <name>", "Remove an approved skill"),
         ("/remember <text>", "Store a rule or preference the agent should remember"),
         ("/forget <id_or_query>", "Deactivate a remembered rule by ID or search"),
         ("/learn-this", "Extract a rule from the last assistant message"),
@@ -1498,7 +1500,113 @@ async def handle_skills_command(args: str):
         console.print(f"[success]\u2714 Reloaded {count} skill(s) from disk.[/]")
         return
 
-    console.print(f"[warning]Unknown: /skills {subcmd}. Try /skills or /skills reload[/]")
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "pending":
+        pending = registry.list_pending()
+        if not pending:
+            console.print("[dim]No pending skill candidates.[/]")
+            return
+        table = Table(
+            title="Pending Skill Candidates",
+            title_style="bold white",
+            border_style="yellow",
+            header_style="bold yellow",
+        )
+        table.add_column("Name", style="bold")
+        table.add_column("Mode", style="cyan")
+        table.add_column("Description", style="white")
+        for skill in pending:
+            table.add_row(skill.name, skill.mode, skill.description[:60] or "-")
+        console.print()
+        console.print(table)
+        console.print("\n[dim]Use [bold]/skills review[/] to approve/reject, or [bold]/skills show <name>[/] to inspect.[/]")
+        return
+
+    if subcmd == "show":
+        if not arg:
+            console.print("[warning]Usage: /skills show <name>[/]")
+            return
+        skill = registry.skills.get(arg) or registry.get_pending(arg)
+        if not skill:
+            console.print(f"[error]No skill named '{arg}'.[/]")
+            return
+        console.print(Panel(
+            f"[bold]{skill.name}[/] — [dim]{skill.mode}[/]\n"
+            f"[dim]{skill.description}[/]\n"
+            f"[dim]agents: {', '.join(skill.allowed_agents)}[/]\n\n"
+            f"{skill.instructions}",
+            title="[bold white]Skill[/]",
+            border_style="cyan",
+        ))
+        return
+
+    if subcmd == "approve":
+        if not arg:
+            console.print("[warning]Usage: /skills approve <name>[/]")
+            return
+        path = registry.approve_pending(arg)
+        if path is None:
+            console.print(f"[error]No pending candidate named '{arg}'.[/]")
+            return
+        console.print(f"[success]\u2714 Approved: {arg}[/]")
+        return
+
+    if subcmd == "reject":
+        if not arg:
+            console.print("[warning]Usage: /skills reject <name>[/]")
+            return
+        if registry.reject_pending(arg):
+            console.print(f"[success]\u2714 Rejected: {arg}[/]")
+        else:
+            console.print(f"[error]No pending candidate named '{arg}'.[/]")
+        return
+
+    if subcmd == "delete":
+        if not arg:
+            console.print("[warning]Usage: /skills delete <name>[/]")
+            return
+        if registry.delete_approved(arg):
+            console.print(f"[success]\u2714 Deleted approved skill: {arg}[/]")
+        else:
+            console.print(f"[error]No approved skill named '{arg}'.[/]")
+        return
+
+    if subcmd == "review":
+        pending = registry.list_pending()
+        if not pending:
+            console.print("[dim]No pending skill candidates to review.[/]")
+            return
+        console.print(f"[info]{len(pending)} candidate(s) to review. Commands: [bold]a[/]=approve, [bold]r[/]=reject, [bold]s[/]=skip, [bold]q[/]=quit[/]")
+        for idx, skill in enumerate(pending, 1):
+            console.print()
+            console.print(Panel(
+                f"[bold]{skill.name}[/] — [dim]{skill.mode}[/]\n"
+                f"[dim]{skill.description}[/]\n\n"
+                f"{skill.instructions}",
+                title=f"[bold yellow]Candidate {idx}/{len(pending)}[/]",
+                border_style="yellow",
+            ))
+            try:
+                answer = console.input("[bold]Action ([a]pprove / [r]eject / [s]kip / [q]uit): [/]").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]Review cancelled.[/]")
+                return
+            if answer == "a" or answer == "approve":
+                registry.approve_pending(skill.name)
+                console.print(f"[success]\u2714 Approved: {skill.name}[/]")
+            elif answer == "r" or answer == "reject":
+                registry.reject_pending(skill.name)
+                console.print(f"[warning]\u2717 Rejected: {skill.name}[/]")
+            elif answer == "q" or answer == "quit":
+                console.print("[dim]Review stopped.[/]")
+                return
+            else:
+                console.print("[dim]Skipped.[/]")
+        return
+
+    console.print(f"[warning]Unknown: /skills {subcmd}.[/]")
+    console.print("[dim]Available: /skills, /skills pending, /skills review, /skills show <name>, /skills approve <name>, /skills reject <name>, /skills delete <name>, /skills reload[/]")
 
 
 async def handle_scan_command(args: str):
@@ -1710,147 +1818,228 @@ async def handle_scan_command(args: str):
     ))
 
 
-async def handle_chat_mode(initial_message: str = ""):
-    """Enter interactive chat mode — direct conversation with the LLM.
-    Each session is stateless (no memory context carried over)."""
-    console.print()
-    console.print(Panel(
-        f"[bold white]Chat Mode[/] — Direct conversation with [cyan]{state.llm_provider}/{state.model}[/]\n\n"
-        "[dim]This is a stateless chat — no memory or context is carried between messages.\n"
-        "Each message is an independent conversation.\n\n"
-        "Type [bold]/back[/] or [bold]/exit[/] to return to the main CLI.[/]",
-        title="[bold]\U0001f4ac Chat[/]",
-        border_style="cyan",
-    ))
+async def _direct_reply(
+    user_input: str,
+    *,
+    enable_web: bool,
+    intent_label: str,
+) -> None:
+    """Direct LLM reply for CONVERSATION and QUERY intents.
 
-    # Use call_llm directly (bypasses backend WebSocket)
-    from agent_team.llm import call_llm
-    from agent_team.llm.registry import get_active_provider_name
+    Injects the session's recent history so the agent can resolve "explain
+    that" / "go on" references. When ``enable_web`` is True, a short hint is
+    appended to the system prompt nudging the LLM to surface currency
+    caveats (the runner-level web search isn't wired here — that's a TASK
+    feature — so this is best-effort).
+    """
     from agent_team.config import MODEL_ROUTING
-    from agent_team.llm import get_active_model, set_active_model
+    from agent_team.llm import call_llm, get_active_model, set_active_model
 
     system_prompt = (
-        "You are a helpful AI assistant. Answer questions clearly and concisely. "
-        "If the user asks for code, provide well-formatted code with explanations."
+        "You are a helpful AI assistant. Answer clearly and concisely. "
+        "Use well-formatted code blocks when providing code examples."
     )
+    if enable_web:
+        system_prompt += (
+            "\n\nThis is a factual question. If the answer depends on "
+            "current/latest information (versions, releases, news, prices), "
+            "say 'As of my training data …' and recommend the user verify "
+            "with the official source."
+        )
 
-    # A6: Route to fast model for chat
-    chat_model = MODEL_ROUTING.get("chat")
+    messages: list[dict] = []
+    for msg in state.session.messages[-8:]:
+        if msg.role == "user":
+            messages.append({"role": "user", "content": msg.content})
+        elif msg.role == "agent":
+            messages.append({"role": "assistant", "content": msg.content})
+    messages.append({"role": "user", "content": user_input})
+
+    # Route to fast model for lightweight replies when available.
+    fast_model = MODEL_ROUTING.get("chat") or MODEL_ROUTING.get("ask")
     original_model = get_active_model()
     did_swap = False
-    if chat_model and chat_model != original_model:
-        set_active_model(chat_model)
-        did_swap = True
+    if fast_model and fast_model != original_model:
+        try:
+            set_active_model(fast_model)
+            did_swap = True
+        except Exception:
+            did_swap = False
 
-    display_model = chat_model or original_model
-    session = PromptSession(style=pt_style)
+    header = {
+        "conversation": "[bold]\U0001f4ac Chat[/]",
+        "query": "[bold]\u2753 Query[/]",
+    }.get(intent_label, "[bold]Reply[/]")
 
-    # Process initial message if provided
-    if initial_message:
-        await _chat_send(initial_message, system_prompt, call_llm)
-
+    console.print()
+    console.print(f"[dim]Thinking…[/]", end="")
     try:
-        while True:
-            try:
-                user_input = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: session.prompt(
-                        HTML(f'<style fg="#00d4aa" bold="true">{state.llm_provider} \u276f </style>'),
-                        bottom_toolbar=lambda: HTML(
-                            f'<style bg="#1a1a2e" fg="#aaaaaa"> Chat Mode | '
-                            f'{state.llm_provider}/{display_model} | '
-                            f'/back to return </style>'
-                        ),
-                    ),
-                )
-
-                user_input = user_input.strip()
-                if not user_input:
-                    continue
-
-                if user_input.lower() in ("/back", "/exit", "/quit", "/q"):
-                    console.print("[dim]Returning to main CLI...[/]\n")
-                    break
-
-                if user_input.lower() == "/clear":
-                    console.clear()
-                    continue
-
-                await _chat_send(user_input, system_prompt, call_llm)
-
-            except KeyboardInterrupt:
-                console.print("\n[dim]Type /back to return to main CLI[/]")
-                continue
-            except EOFError:
-                console.print("[dim]Returning to main CLI...[/]\n")
-                break
-    finally:
-        if did_swap:
-            set_active_model(original_model)
-
-
-async def _chat_send(message: str, system_prompt: str, call_fn):
-    """Send a single chat message and display the response."""
-    console.print(f"\n[dim]Thinking...[/]", end="")
-
-    try:
-        response = await call_fn(
+        response = await call_llm(
             system_prompt=system_prompt,
-            messages=[{"role": "user", "content": message}],
+            messages=messages,
             temperature=0.5,
         )
-        # Clear the "Thinking..." line
         console.print("\r", end="")
-
         if response.strip():
             console.print()
             console.print(Panel(
                 Markdown(response),
+                title=header,
                 border_style="dim cyan",
                 padding=(1, 2),
             ))
+            state.session.add_agent_output("assistant", response)
         else:
             console.print("\r[warning]No response from LLM. Check provider/model.[/]")
-
     except Exception as e:
         console.print(f"\r[error]Error: {e}[/]")
-
-    console.print("[dim]---[/] [dim italic]New message = new conversation (no context carried over)[/]")
-    console.print()
-
-
-async def handle_ask_command(question: str):
-    """Handle /ask — single question, single answer. Stateless."""
-    if not question:
-        console.print("[warning]Usage: /ask <your question>[/]")
-        return
-
-    from agent_team.config import MODEL_ROUTING
-    from agent_team.llm import call_llm, get_active_model, set_active_model
-
-    # A6: Route to fast model for ask
-    ask_model = MODEL_ROUTING.get("ask")
-    original_model = get_active_model()
-    did_swap = False
-    if ask_model and ask_model != original_model:
-        set_active_model(ask_model)
-        did_swap = True
-
-    console.print()
-    console.print(Panel(
-        f"[dim]Asking [cyan]{state.llm_provider}/{ask_model or original_model}[/] (no context, single response)[/]",
-        title="[bold]\u2753 Ask[/]",
-        border_style="cyan",
-    ))
-
-    try:
-        await _chat_send(question, (
-            "You are a helpful AI assistant. Answer the question clearly and concisely. "
-            "Provide well-formatted answers with code examples where appropriate."
-        ), call_llm)
     finally:
         if did_swap:
-            set_active_model(original_model)
+            try:
+                set_active_model(original_model)
+            except Exception:
+                pass
+
+
+async def _confirm_execute() -> str:
+    """Ask the user to approve, reject, or revise a plan. Returns one of
+    ``"yes"``, ``"no"``, ``"revise:<text>"``."""
+    try:
+        answer = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: input(
+                "\nProceed with execution? [Y = yes, n = no, r = revise]: "
+            ).strip().lower(),
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Cancelled.[/]")
+        return "no"
+
+    if answer in ("", "y", "yes"):
+        return "yes"
+    if answer in ("n", "no"):
+        console.print("[dim]Plan discarded.[/]")
+        return "no"
+    if answer.startswith("r"):
+        try:
+            revision = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: input("What should change? > ").strip(),
+            )
+        except (EOFError, KeyboardInterrupt):
+            return "no"
+        if revision:
+            return f"revise:{revision}"
+        return "no"
+    return "no"
+
+
+async def _task_flow(user_input: str, detected_mode: str, plan_only_mode: bool) -> None:
+    """Run the multi-agent pipeline for TASK intent with a confirm gate.
+
+    ``plan_only_mode=True`` stops after planning regardless of the mode —
+    used when the IntentRouter is uncertain. ``False`` lets coding/execution
+    modes fall through to the existing execute-path prompt flow.
+    """
+    state.mcp_data_returned = False
+    _, plan_outputs = await stream_conversation(user_input, detected_mode, plan_only=True)
+    state.conversation_count += 1
+
+    if state.mcp_data_returned:
+        console.print("[dim]MCP tools returned data — no execution needed.[/]")
+        return
+    if plan_only_mode:
+        return
+    if detected_mode not in ("coding", "execution"):
+        return
+
+    verdict = await _confirm_execute()
+    if verdict == "no":
+        return
+    if verdict.startswith("revise:"):
+        revision = verdict.split(":", 1)[1]
+        combined = f"{user_input}\n\n[Revision requested]: {revision}"
+        console.print("[dim]Re-planning with your revision…[/]")
+        state.session.add_user_message(f"[revision] {revision}")
+        await _task_flow(combined, detected_mode, plan_only_mode=False)
+        return
+
+    # Yes → execute.
+    detected_path = extract_path_from_text(user_input)
+    if detected_path:
+        console.print(f"[dim]Detected path: {detected_path} \u2014 executing here[/]")
+        exec_path, should_exec = detected_path, True
+    else:
+        exec_path, should_exec = await ask_execute_location()
+    if should_exec and exec_path:
+        await stream_conversation(
+            user_input, detected_mode,
+            execution_path=exec_path, plan_only=False,
+            reuse_plan=True, phase_outputs=plan_outputs,
+        )
+        state.conversation_count += 1
+
+
+async def _dispatch_user_input(user_input: str) -> None:
+    """Unified entry: classify intent, route to conversation / query / task.
+
+    Replaces the old ``/ask`` / ``/chat`` / ``/plan`` / ``/exec`` slash
+    commands plus the bare-input path. Every input goes through the same
+    router and updates ``state.session`` so history is unified.
+    """
+    from agent_team.agents.intent import Intent, classify_intent
+
+    state.session.add_user_message(user_input)
+    intent = await classify_intent(user_input, session=state.session)
+
+    # Minimal UX cue so users can see the routing decision.
+    tag_color = {
+        Intent.CONVERSATION: "#00d4aa",
+        Intent.QUERY: "#7dc5ff",
+        Intent.TASK: "#ffb36b",
+    }.get(intent.intent, "#aaaaaa")
+    console.print(
+        f"[dim][italic][[/italic]"
+        f"[{tag_color}]{intent.intent.value}[/{tag_color}]"
+        f"[italic] {intent.reason} · {intent.source} "
+        f"({intent.confidence:.2f})][/italic][/]"
+    )
+
+    if intent.intent == Intent.CONVERSATION:
+        await _direct_reply(user_input, enable_web=False, intent_label="conversation")
+        return
+
+    if intent.intent == Intent.QUERY:
+        await _direct_reply(user_input, enable_web=intent.needs_web, intent_label="query")
+        return
+
+    # TASK: pick a mode, check backend, run pipeline with confirm.
+    if not state.backend_connected:
+        connected = await check_backend()
+        if not connected:
+            console.print("[error]Backend not connected. Try /status to reconnect.[/]")
+            return
+
+    task_cls = intent.task_classification
+    if task_cls and task_cls.mode_hint:
+        detected_mode = task_cls.mode_hint
+    else:
+        detected_mode = auto_detect_mode(user_input)
+    if detected_mode != state.mode:
+        console.print(f"[dim]Mode: {MODE_ICONS.get(detected_mode, '')} {detected_mode}[/]")
+
+    await check_tool_triggers(user_input)
+
+    # Low-confidence TASK classifications stay in plan-only mode — we never
+    # want to silently fire off an execution for an ambiguous input.
+    plan_only_mode = intent.confidence < 0.7 or intent.source == "fallback"
+    await _task_flow(user_input, detected_mode, plan_only_mode=plan_only_mode)
+
+    followup = await handle_followup()
+    while followup:
+        state.session.add_user_message(followup)
+        await _task_flow(followup, auto_detect_mode(followup), plan_only_mode=False)
+        followup = await handle_followup()
 
 
 async def check_tool_triggers(text: str) -> bool:
@@ -2166,6 +2355,16 @@ def get_bottom_toolbar():
     mode_icon = MODE_ICONS.get(state.mode, "")
     tokens = f" | Tokens: {state.total_session_tokens}" if state.total_session_tokens else ""
 
+    # Session cost (C2) — only shown when non-zero to keep the bar short.
+    cost_part = ""
+    try:
+        from agent_team.llm.pricing import current_session_usage
+        total_cost = current_session_usage().total_cost()
+        if total_cost > 0:
+            cost_part = f" | ${total_cost:.4f}"
+    except Exception:
+        pass
+
     # Shorten the cwd for display
     cwd_display = state.user_cwd.replace(os.path.expanduser("~"), "~")
 
@@ -2173,7 +2372,7 @@ def get_bottom_toolbar():
         f'<style bg="#1a1a2e" fg="{conn_color}"> {conn} </style>'
         f'<style bg="#1a1a2e" fg="#aaaaaa"> | {cwd_display} | '
         f'{state.llm_provider}/{state.model} | '
-        f'{mode_icon} {state.mode}{tokens} | /help </style>'
+        f'{mode_icon} {state.mode}{tokens}{cost_part} | /help </style>'
     )
 
 
@@ -2300,58 +2499,15 @@ async def main():
                     console.print(f"[dim]Conversations this session: {state.conversation_count}[/]")
                     console.print(f"[dim]Total tokens used: {state.total_session_tokens}[/]")
 
-                elif cmd == "/ask":
-                    await handle_ask_command(args)
-
-                elif cmd == "/chat":
-                    await handle_chat_mode(args)
-
-                elif cmd == "/plan":
-                    if not args:
-                        console.print("[warning]Usage: /plan <your task description>[/]")
-                        continue
-                    if not state.backend_connected:
-                        console.print("[error]Backend not connected. Try /status to reconnect.[/]")
-                        continue
-                    detected = auto_detect_mode(args)
-                    console.print(f"[dim]Auto-detected mode: {MODE_ICONS.get(detected, '')} {detected}[/]")
-                    _, _ = await stream_conversation(args, detected, plan_only=True)
-                    state.conversation_count += 1
-                    followup = await handle_followup()
-                    if followup:
-                        detected2 = auto_detect_mode(followup)
-                        _, _ = await stream_conversation(followup, detected2, plan_only=True)
-                        state.conversation_count += 1
-
-                elif cmd == "/exec":
-                    if not args:
-                        console.print("[warning]Usage: /exec <your task description>[/]")
-                        continue
-                    if not state.backend_connected:
-                        console.print("[error]Backend not connected. Try /status to reconnect.[/]")
-                        continue
-                    detected = auto_detect_mode(args)
-                    if detected not in ("coding", "execution"):
-                        detected = "coding"
-                    # Plan first
-                    console.print(f"[dim]Planning in {detected} mode...[/]")
-                    _, plan_outputs = await stream_conversation(args, detected, plan_only=True)
-                    state.conversation_count += 1
-                    # A3: Auto-detect path from input
-                    detected_path = extract_path_from_text(args)
-                    if detected_path:
-                        console.print(f"[dim]Detected path: {detected_path} \u2014 executing here[/]")
-                        exec_path, should_exec = detected_path, True
-                    else:
-                        exec_path, should_exec = await ask_execute_location()
-                    if should_exec and exec_path:
-                        # A5: Reuse plan — skip re-thinking
-                        await stream_conversation(
-                            args, detected,
-                            execution_path=exec_path, plan_only=False,
-                            reuse_plan=True, phase_outputs=plan_outputs,
-                        )
-                        state.conversation_count += 1
+                elif cmd in ("/ask", "/chat", "/plan", "/exec"):
+                    # These commands were removed — auto-routing now handles them.
+                    # Redirect to the dispatcher so existing muscle memory still works.
+                    console.print(
+                        f"[dim]{cmd} was removed — the agent now auto-routes. "
+                        "Just type your input directly next time.[/]"
+                    )
+                    if args.strip():
+                        await _dispatch_user_input(args.strip())
 
                 elif cmd == "/remember":
                     await handle_remember_command(args)
@@ -2418,62 +2574,8 @@ async def main():
             except Exception:
                 pass  # Never break the main loop
 
-            # Auto-detect mode
-            detected_mode = auto_detect_mode(user_input)
-            if detected_mode != state.mode:
-                console.print(f"[dim]Auto-detected mode: {MODE_ICONS.get(detected_mode, '')} {detected_mode}[/]")
-
-            # Check for MCP/skills triggers
-            await check_tool_triggers(user_input)
-
-            # Default: plan-only first
-            state.mcp_data_returned = False  # Reset before each run
-            _, plan_outputs = await stream_conversation(user_input, detected_mode, plan_only=True)
-            state.conversation_count += 1
-
-            # If MCP tools already returned data (e.g. query results), skip execute prompt
-            if state.mcp_data_returned:
-                console.print("[dim]MCP tools returned data — no execution needed.[/]")
-            # For coding/execution modes, offer to execute after planning
-            elif detected_mode in ("coding", "execution"):
-                # A3: Auto-detect path from user input
-                detected_path = extract_path_from_text(user_input)
-                if detected_path:
-                    console.print(f"[dim]Detected path: {detected_path} \u2014 executing here[/]")
-                    exec_path, should_exec = detected_path, True
-                else:
-                    exec_path, should_exec = await ask_execute_location()
-                if should_exec and exec_path:
-                    # A5: Reuse plan — skip re-thinking
-                    await stream_conversation(
-                        user_input, detected_mode,
-                        execution_path=exec_path, plan_only=False,
-                        reuse_plan=True, phase_outputs=plan_outputs,
-                    )
-                    state.conversation_count += 1
-
-            # Follow-up
-            followup = await handle_followup()
-            while followup:
-                detected2 = auto_detect_mode(followup)
-                _, followup_outputs = await stream_conversation(followup, detected2, plan_only=True)
-                state.conversation_count += 1
-                # Offer execution for follow-ups too
-                if detected2 in ("coding", "execution"):
-                    fp = extract_path_from_text(followup)
-                    if fp:
-                        console.print(f"[dim]Detected path: {fp} \u2014 executing here[/]")
-                        ep, se = fp, True
-                    else:
-                        ep, se = await ask_execute_location()
-                    if se and ep:
-                        await stream_conversation(
-                            followup, detected2,
-                            execution_path=ep, plan_only=False,
-                            reuse_plan=True, phase_outputs=followup_outputs,
-                        )
-                        state.conversation_count += 1
-                followup = await handle_followup()
+            # Auto-route via IntentRouter (CONVERSATION / QUERY / TASK).
+            await _dispatch_user_input(user_input)
 
         except KeyboardInterrupt:
             console.print("\n[dim]Use /exit to quit[/]")

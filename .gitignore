@@ -38,6 +38,7 @@ ENV/
 # ── Runtime data (generated, user-specific) ──────────────
 data/
 plans/
+skills/pending/
 
 # ── Agent Team config (may contain user-specific paths) ──
 agent_team.config.json
@@ -46,6 +47,7 @@ mcp.json
 # ── Environment / secrets ────────────────────────────────
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 credentials.json

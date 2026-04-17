@@ -2,6 +2,199 @@
 
 ---
 
+## v8.0.0 — General Availability (2026-04-17)
+
+Rolls up the v8.0 alpha series (Phases 1-3 — EventEmitter, Task Graph,
+Domain Plugins + Artifacts) plus four Hermes-inspired additions into a
+single GA release:
+
+- **Auto-Routing CLI** — kills `/ask`, `/chat`, `/plan`, `/exec`; the agent
+  classifies every input as CONVERSATION / QUERY / TASK via a hybrid
+  regex+LLM router and routes itself. TASK intents stop after planning and
+  ask `[Y/n/r]` before executing.
+- **Skill Self-Evolution (C1)** — patterns with confidence ≥ 0.7 auto-stage
+  as `skills/pending/*` candidates; approve via `/skills review`.
+- **Provider Industrialization (C2)** — credential pool, predictive rate
+  tracker, Anthropic prompt caching, session cost tracking for Anthropic /
+  OpenAI / OpenRouter.
+- **Telegram Gateway (C3)** — `agent-team-gateway telegram` command reuses
+  `CallbackEmitter` to drive the pipeline from Telegram.
+
+Full detail for each section is below (previously tagged `[Unreleased]`).
+
+### Version display bumps
+
+- `pyproject.toml`, `cli/interactive.py::APP_VERSION`, `cli/classic.py`
+  help string, `server/app.py` FastAPI title, `mcp/client.py` clientInfo:
+  7.0.0 → 8.0.0.
+
+---
+
+## v8.0.0 — Auto-Routing CLI (kills /ask /chat /plan /exec)
+
+### Summary
+
+Replaces the explicit ``/ask``, ``/chat``, ``/plan``, ``/exec`` slash commands
+with a single auto-router. Users just type; the agent decides in ~1 ms (fast
+path) or ~300 ms (slow path) whether the input is a **CONVERSATION**
+(greeting/thanks/continuation → direct LLM, no tools), a **QUERY** (factual
+question → direct LLM with timeliness caveat), or a **TASK** (imperative
+work → multi-agent pipeline with plan → confirm → execute gate).
+
+Addresses the reported regression where ``what is the latest version of
+airflow`` burned 12,663 tokens walking into the MEDIUM pipeline — that query
+now classifies as QUERY in under 1 ms and answers via a single fast-model
+call.
+
+### Added
+
+- `src/agent_team/agents/intent.py` — ``Intent``, ``IntentClassification``,
+  ``classify_intent()``. Hybrid classifier: regex/keyword ladder first, then
+  ``FAST_MODEL`` few-shot JSON classification for ambiguous inputs, then
+  heuristic fallback on LLM failure.
+- `src/agent_team/agents/complexity.py::is_question_query()` — detects
+  question-form input in English + CJK, short-circuits `classify_complexity`
+  to `SIMPLE` and forces `domain="research"`, `needs_tools=True`,
+  `mode_hint="thinking"` in `classify_task`.
+- `_dispatch_user_input()`, `_direct_reply()`, `_task_flow()`, and
+  `_confirm_execute()` in `cli/interactive.py` — the new REPL entry plus a
+  confirm gate that asks ``[Y/n/r]`` before executing a planned task.
+- `tests/test_intent_router.py` — 44 tests.
+
+### Changed
+
+- `cli/interactive.py` REPL no longer auto-executes. Bare input is routed
+  through the intent classifier; TASK intents stop after planning and ask
+  for confirmation. Low-confidence TASK classifications always stay in
+  plan-only mode.
+- `/ask`, `/chat`, `/plan`, `/exec` slash commands are removed. Typing any
+  of them prints a one-line migration hint and re-dispatches the payload
+  through the auto-router.
+- `/help` command table no longer lists those four commands; replaced with
+  a single ``(just type)`` hint describing auto-routing.
+- Session history is now unified across conversation / query / task paths
+  (previously `/ask` and `/chat` bypassed `SessionContext`).
+
+### Removed
+
+- `handle_ask_command()`, `handle_chat_mode()`, and `_chat_send()` in
+  `cli/interactive.py`.
+
+---
+
+## [Unreleased] — Telegram Gateway (C3, Hermes-inspired)
+
+### Summary
+
+Ships a Telegram bot that wraps the existing ``AgentTeam`` pipeline —
+remote / mobile users can run the agent team from their phone. The gateway
+reuses ``CallbackEmitter`` so the agent code path is untouched; only the
+transport is new. Authorization is a comma-separated allowlist of Telegram
+user IDs; an empty list denies everyone.
+
+### Added
+
+- `src/agent_team/gateway/` package (new top-level module).
+- `gateway/formatting.py` — `escape_markdown_v2`, `chunk_for_telegram`
+  (4096-char limit, code-fence aware), `format_agent_event`.
+- `gateway/telegram.py` — `TelegramGateway` and `SessionBuffer`.
+  ``/start``, ``/status``, ``/ask <prompt>`` commands. Status message
+  edits in place every ~2s, final answer is sent as MarkdownV2 chunks.
+- `gateway/entry.py` — typer-based CLI; installed as
+  ``agent-team-gateway`` script.
+- `bin/start-gateway.sh` — convenience launcher using ``uv run`` when
+  available.
+- `tests/test_gateway_telegram.py` — 31 tests (no aiogram required).
+- `.env.example` documents ``TELEGRAM_BOT_TOKEN`` and
+  ``TELEGRAM_ALLOWED_USERS``.
+
+### Changed
+
+- `pyproject.toml` gains an optional ``gateway`` extra
+  (``pip install -e '.[gateway]'``) pulling in ``aiogram>=3.4``, and a
+  new ``agent-team-gateway`` script entry.
+
+---
+
+## [Unreleased] — Provider Industrialization (C2, Hermes-inspired)
+
+### Summary
+
+Upgrades the cloud LLM path from "works" to "stays cheap and stable".
+Introduces (a) a credential pool that round-robins across multiple keys
+per provider and cools keys that 401/429, (b) a predictive rate tracker
+that sleeps pre-call when a provider nears 80% of its rolling limit,
+(c) Anthropic native ephemeral prompt caching on long system prompts, and
+(d) per-session cost tracking with a pricing table for Sonnet/Opus/Haiku 4,
+GPT-4o family, and OpenRouter free models. Scope is intentionally limited
+to Anthropic, OpenAI, and OpenRouter for this pass.
+
+### Added
+
+- `src/agent_team/llm/credential_pool.py` — discovers
+  ``PROVIDER_API_KEY_1..N`` env vars, round-robins, cools on failure.
+- `src/agent_team/llm/rate_tracker.py` — 60-second sliding window per
+  provider, soft throttling at 80% of RPM or TPM.
+- `src/agent_team/llm/prompt_cache.py` — `build_anthropic_system()`
+  wraps long prompts in a `cache_control: ephemeral` block (min 400 chars).
+- `src/agent_team/llm/pricing.py` — `lookup_price()` and `SessionUsage`
+  aggregator; cache-read tokens reduce the billed prompt count.
+- `.env.example` with documentation for `_2/_3` key suffixes and the
+  `PROVIDER_RATE_LIMIT` override.
+- `tests/test_provider_industrialization.py` — 30 tests.
+
+### Changed
+
+- `llm/base.py::TokenStats` gains `cache_read_tokens` and
+  `cache_write_tokens`.
+- `llm/openai_compat.py::_get_headers()` now calls `_resolve_key()`, which
+  consults the credential pool for providers in `INDUSTRIALIZED_PROVIDERS`.
+- `llm/providers.py::AnthropicProvider` threads the cache-aware system
+  builder into both `stream()` and `call()`; reads `cache_read_input_tokens`
+  and `cache_creation_input_tokens` from the response stream.
+- `llm/registry.py::stream_llm()/call_llm()` now await `_wait_if_throttled()`
+  pre-call and record usage post-call into the rate tracker and session
+  pricing (industrialized providers only).
+
+---
+
+## [Unreleased] — Skill Self-Evolution (C1, Hermes-inspired)
+
+### Summary
+
+Closes the loop between `learning/` and `skills/`: learned patterns with
+confidence ≥ 0.7 now auto-generate candidate skills, which land in
+`skills/pending/` for manual review via `/skills review`. Approved candidates
+move to the live registry and are injected into agent prompts the next run.
+The registry never auto-promotes without human approval.
+
+### Added
+
+- `src/agent_team/skills/writer.py` — serialize `Skill` → `SKILL.md`
+  (inverse of loader); helpers for slug, delete, move between subdirs.
+- `src/agent_team/skills/promoter.py` — LLM-driven rewrite of a
+  `LearnedPattern` into an imperative, reusable `Skill` candidate. LLM is
+  injectable for tests and returns `None` on `SKIP:` output.
+- `SkillRegistry.list_pending()`, `stage_candidate()`, `approve_pending()`,
+  `reject_pending()`, `delete_approved()`, `candidate_exists()`.
+- CLI: `/skills pending | review | show <name> | approve <name> |
+  reject <name> | delete <name>` subcommands.
+- `learning/extractor.py::_maybe_stage_candidates()` — invoked after
+  error-pattern extraction and end-of-session summarization.
+- `tests/test_skills_evolution.py` — 22 tests covering writer, loader
+  exclusions, registry review flow, promoter parsing, and the staging hook.
+
+### Changed
+
+- `skills/registry.py` now skips the `pending/` subdirectory when loading
+  approved skills.
+- `skills/loader.py::load_skills_from_dir()` gains an `exclude_subdirs`
+  kwarg for filtering unapproved candidates.
+- `learning/extractor.py::extract_session_knowledge()` returns an extra
+  `skill_candidates_staged` field in its result dict.
+
+---
+
 ## v8.0.0-alpha.3 — Domain Plugins + Artifact System (Phase 3) (2026-04-16)
 
 ### Summary

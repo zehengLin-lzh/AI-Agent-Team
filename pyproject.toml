@@ -1,6 +1,6 @@
 [project]
 name = "ai-agent-team"
-version = "7.0.0"
+version = "8.0.0"
 description = "Self-learning local AI agent team for coding, thinking, brainstorming, architecture, and execution"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,9 +21,15 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
 ]
 
+[project.optional-dependencies]
+gateway = [
+    "aiogram>=3.4",
+]
+
 [project.scripts]
 agent-team = "agent_team.cli.interactive:main_sync"
 agent-team-classic = "agent_team.cli.classic:app"
+agent-team-gateway = "agent_team.gateway.entry:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

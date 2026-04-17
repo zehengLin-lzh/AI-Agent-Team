@@ -58,6 +58,37 @@ _FILE_REFS = re.compile(
     re.IGNORECASE,
 )
 
+# Question-form queries: informational lookups that should never trigger the
+# heavy multi-agent pipeline by default (SIMPLE + research domain).
+_QUESTION_LEADERS = re.compile(
+    r"^(\s*)(what|who|when|where|why|how|which|is|are|does|do|can|could|"
+    r"should|will|would|has|have|did|was|were|am)\b",
+    re.IGNORECASE,
+)
+_CJK_QUESTION_LEADERS = re.compile(
+    r"^[\s]*(什么|怎么|为什么|是否|哪|哪个|哪些|如何|为啥|怎样)",
+)
+
+
+def is_question_query(user_plan: str) -> bool:
+    """True if the input looks like a factual/informational question.
+
+    Intentionally conservative: short inputs only, and either leading with a
+    question word or ending with a question mark. Longer or imperative
+    inputs (even if they contain '?') stay out of this bucket.
+    """
+    text = user_plan.strip()
+    if not text:
+        return False
+    word_count = len(text.split())
+    if word_count > 20:
+        return False
+    if text.endswith("?") or text.endswith("？"):
+        return True
+    if _QUESTION_LEADERS.match(text) or _CJK_QUESTION_LEADERS.match(text):
+        return True
+    return False
+
 
 def classify_complexity(user_plan: str, mode: str = "coding") -> TaskComplexity:
     """Classify task complexity using heuristics. No LLM call — must be instant.
@@ -65,6 +96,12 @@ def classify_complexity(user_plan: str, mode: str = "coding") -> TaskComplexity:
     Returns SIMPLE for focused single-file tasks, COMPLEX for multi-component
     architecture work, and MEDIUM for everything in between.
     """
+    # Short factual questions should never walk into a MEDIUM pipeline by
+    # default — they belong on the SIMPLE track (or, at the CLI layer, on the
+    # QUERY path that IntentRouter decides before we're even called).
+    if is_question_query(user_plan):
+        return TaskComplexity.SIMPLE
+
     word_count = len(user_plan.split())
     simple_hits = len(_SIMPLE_KEYWORDS.findall(user_plan))
     complex_hits = len(_COMPLEX_KEYWORDS.findall(user_plan))
@@ -176,8 +213,17 @@ def classify_task(user_plan: str, mode: str = "coding") -> TaskClassification:
     if scores[best_domain] == 0:
         best_domain = "general"
 
-    # Tool detection
-    needs_tools = bool(_TOOL_KW.search(user_plan))
+    # Tool detection — factual questions also need web search even without
+    # explicit tool keywords.
+    needs_tools = bool(_TOOL_KW.search(user_plan)) or is_question_query(user_plan)
+
+    # Question-form queries belong to the research domain and are best
+    # handled in a light "thinking" pipeline if they do reach the pipeline.
+    if is_question_query(user_plan):
+        best_domain = "research"
+        mode_hint_override = "thinking"
+    else:
+        mode_hint_override = None
 
     # Extract key entities (simple: unique capitalized words and file refs)
     entities = list(set(_FILE_REFS.findall(user_plan)))[:10]
@@ -192,6 +238,8 @@ def classify_task(user_plan: str, mode: str = "coding") -> TaskClassification:
         mode_hint = "thinking"
     elif best_domain == "data":
         mode_hint = "execution"
+    if mode_hint_override:
+        mode_hint = mode_hint_override
 
     return TaskClassification(
         complexity=complexity,
